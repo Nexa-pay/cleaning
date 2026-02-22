@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from aiohttp import web
 
@@ -408,70 +409,115 @@ class TelegramReportBot:
             parse_mode='Markdown'
         )
     
+    # ========== IMPROVED BUTTON HANDLER ==========
     async def menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle menu button callbacks"""
+        """Handle menu button callbacks - IMPROVED VERSION with better error handling"""
         query = update.callback_query
-        await query.answer()
-        
-        data = query.data
-        user_id = update.effective_user.id
-        
-        logger.info(f"Menu callback: {data} from user {user_id}")
         
         try:
-            # Check admin access for admin panel
+            # Always answer the callback query first
+            await query.answer()
+            
+            data = query.data
+            user_id = update.effective_user.id
+            
+            logger.info(f"📱 Menu callback received: {data} from user {user_id}")
+            
+            # Show typing indicator
+            await query.message.chat.send_action(action="typing")
+            
+            # ===== HANDLE EACH BUTTON TYPE =====
+            
+            # Admin Panel Button
             if data == "menu_admin":
-                # Check if user has admin privileges directly from config
+                # Check if user has admin privileges
                 is_admin = (user_id == config.SUPER_ADMIN_ID or 
                            user_id in config.OWNER_IDS or 
                            user_id in config.ADMIN_IDS)
                 
                 if not is_admin:
-                    await query.message.reply_text("❌ You don't have admin access.")
+                    await query.edit_message_text("❌ You don't have admin access.")
                     return
                 
                 await query.message.delete()
                 await self.admin_handler.admin_panel(update, context)
                 return
             
-            # Handle other menu options
-            if data == "menu_report":
+            # Report Button
+            elif data == "menu_report":
                 await query.message.delete()
                 context.user_data['from_menu'] = True
-                await self.report_handler.start_report(update, context)
-                
+                result = await self.report_handler.start_report(update, context)
+                if result is None:
+                    # If start_report doesn't return a state, send a message
+                    await query.message.reply_text("📝 Starting report process... Use /report to begin.")
+                return
+            
+            # Buy Tokens Button
             elif data == "menu_buy":
                 await query.message.delete()
                 await self.payment_handler.show_token_packages(update, context)
-                
+                return
+            
+            # Accounts Button
             elif data == "menu_accounts":
                 await query.message.delete()
                 await account_manager.show_accounts(update, context)
-                
+                return
+            
+            # My Reports Button
             elif data == "menu_myreports":
                 await query.message.delete()
                 await self.report_handler.my_reports(update, context)
-                
+                return
+            
+            # Help Button
             elif data == "menu_help":
                 await query.message.delete()
                 await self.help_command(update, context)
-                
+                return
+            
+            # Contact Button
             elif data == "menu_contact":
                 await query.message.delete()
                 await self.contact_command(update, context)
-                
+                return
+            
+            # Back to Main Menu Button
             elif data == "back_to_main":
                 await query.message.delete()
                 await self.start(update, context)
+                return
+            
+            # Unknown Button
+            else:
+                logger.warning(f"Unknown callback data: {data}")
+                await query.edit_message_text(
+                    f"❓ Unknown button: `{data}`\n\nPlease use /start to restart.",
+                    parse_mode='Markdown'
+                )
                 
         except Exception as e:
-            logger.error(f"Error in menu callback: {e}", exc_info=True)
+            logger.error(f"❌ Error in menu callback: {e}", exc_info=True)
+            
+            # Try to send error message to user
             try:
-                await query.message.reply_text(
-                    "❌ An error occurred. Please try again or use /start"
+                error_message = (
+                    "❌ **An error occurred while processing your request.**\n\n"
+                    f"Error: `{str(e)[:100]}`\n\n"
+                    "Please try again or use /start"
                 )
+                
+                # Try to edit the original message
+                await query.edit_message_text(error_message, parse_mode='Markdown')
             except:
-                pass
+                try:
+                    # If edit fails, try to send a new message
+                    await query.message.reply_text(
+                        "❌ An error occurred. Please use /start to restart."
+                    )
+                except:
+                    pass
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors gracefully"""
@@ -483,6 +529,7 @@ class TelegramReportBot:
             return
             
         logger.error(f"Update {update} caused error {error}")
+        logger.error(traceback.format_exc())
         
         try:
             if update and update.effective_message:
@@ -617,10 +664,17 @@ class TelegramReportBot:
         self.application.add_handler(report_conv)
         
         # ========== CALLBACK QUERY HANDLERS ==========
+        # Main menu buttons
         self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^menu_'))
+        
+        # Account management buttons
         self.application.add_handler(CallbackQueryHandler(account_manager.handle_account_callback, pattern='^(add_account|refresh_accounts|manage_acc_|activate_acc_|deactivate_acc_|set_primary_|rename_acc_|delete_acc_|acc_reports_|confirm_delete_|back_accounts)$'))
+        
+        # Payment buttons
         self.application.add_handler(CallbackQueryHandler(self.payment_handler.handle_package_selection, pattern='^(buy_stars_|buy_upi_|check_balance)$'))
         self.application.add_handler(CallbackQueryHandler(self.payment_handler.confirm_payment, pattern='^(confirm_stars_|confirm_upi_|cancel_payment)$'))
+        
+        # Admin panel buttons
         self.application.add_handler(CallbackQueryHandler(self.admin_handler.handle_admin_callback, pattern='^admin_'))
         
         # ========== ERROR HANDLER ==========
