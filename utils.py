@@ -4,7 +4,7 @@ import os
 import re
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC  # Fixed import
 import qrcode
 from io import BytesIO
 import pyotp
