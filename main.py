@@ -252,26 +252,6 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Error: {e}")
 
-async def freetokens_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get free tokens for testing"""
-    user_id = update.effective_user.id
-    
-    if not self.is_db_connected():
-        await update.message.reply_text("❌ Database not connected.")
-        return
-    
-    success = await db.update_user_tokens(user_id, 10)
-    
-    if success:
-        await update.message.reply_text(
-            f"✅ You received **10 free tokens** for testing!\n\n"
-            f"Use /balance to check your balance.\n"
-            f"Use /report to start reporting.",
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text("❌ Could not add tokens.")
-
 # ========== MAIN BOT CLASS ==========
 class TelegramReportBot:
     def __init__(self):
@@ -498,6 +478,26 @@ class TelegramReportBot:
         
         await update.message.reply_text(contact_text, parse_mode='Markdown')
     
+    async def freetokens_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Get free tokens for testing"""
+        user_id = update.effective_user.id
+        
+        if not self.is_db_connected():
+            await update.message.reply_text("❌ Database not connected.")
+            return
+        
+        success = await db.update_user_tokens(user_id, 10)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ You received **10 free tokens** for testing!\n\n"
+                f"Use /balance to check your balance.\n"
+                f"Use /report to start reporting.",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("❌ Could not add tokens.")
+    
     async def handle_owner_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle owner feature messages"""
         if context.user_data.get('broadcast_mode'):
@@ -510,7 +510,7 @@ class TelegramReportBot:
             await owner_handler.handle_add_tokens(update, context)
     
     async def menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle menu button callbacks"""
+        """Handle menu button callbacks - FIXED VERSION"""
         query = update.callback_query
         
         try:
@@ -526,28 +526,33 @@ class TelegramReportBot:
                 if not is_owner:
                     await query.edit_message_text("❌ Owner access only.")
                     return
-                await query.message.delete()
+                
+                await query.edit_message_text("👑 Loading owner panel...")
                 await owner_handler.owner_panel(update, context)
                 return
             
             elif data == "owner_panel":
-                await query.message.delete()
+                await query.edit_message_text("👑 Loading owner panel...")
                 await owner_handler.owner_panel(update, context)
                 return
                 
             elif data == "owner_broadcast":
+                await query.edit_message_text("📢 Loading broadcast...")
                 await owner_handler.broadcast_message(update, context)
                 return
                 
             elif data == "owner_giveaway":
+                await query.edit_message_text("🎁 Loading giveaway...")
                 await owner_handler.giveaway_setup(update, context)
                 return
                 
             elif data == "owner_add_tokens":
+                await query.edit_message_text("💰 Loading token adder...")
                 await owner_handler.add_tokens_to_user(update, context)
                 return
                 
             elif data == "owner_stats":
+                await query.edit_message_text("📊 Loading stats...")
                 await owner_handler.owner_stats(update, context)
                 return
             
@@ -559,43 +564,44 @@ class TelegramReportBot:
                 if not is_admin:
                     await query.edit_message_text("❌ No admin access.")
                     return
-                await query.message.delete()
+                
+                await query.edit_message_text("👑 Loading admin panel...")
                 await self.admin_handler.admin_panel(update, context)
                 return
             
             # Regular buttons
             elif data == "menu_report":
-                await query.message.delete()
+                await query.edit_message_text("📝 Loading report...")
                 await self.report_handler.start_report(update, context)
                 return
             
             elif data == "menu_buy":
-                await query.message.delete()
+                await query.edit_message_text("💰 Loading packages...")
                 await self.payment_handler.show_token_packages(update, context)
                 return
             
             elif data == "menu_accounts":
-                await query.message.delete()
+                await query.edit_message_text("📱 Loading accounts...")
                 await account_manager.show_accounts(update, context)
                 return
             
             elif data == "menu_myreports":
-                await query.message.delete()
+                await query.edit_message_text("📊 Loading reports...")
                 await self.report_handler.my_reports(update, context)
                 return
             
             elif data == "menu_help":
-                await query.message.delete()
+                await query.edit_message_text("ℹ️ Loading help...")
                 await self.help_command(update, context)
                 return
             
             elif data == "menu_contact":
-                await query.message.delete()
+                await query.edit_message_text("📞 Loading contact...")
                 await self.contact_command(update, context)
                 return
             
             elif data == "back_to_main":
-                await query.message.delete()
+                await query.edit_message_text("👋 Returning to main menu...")
                 await self.start(update, context)
                 return
             
@@ -606,7 +612,10 @@ class TelegramReportBot:
         except Exception as e:
             logger.error(f"❌ Error in menu callback: {e}")
             try:
-                await query.message.reply_text("❌ An error occurred. Use /start")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="❌ An error occurred. Please use /start"
+                )
             except:
                 pass
     
@@ -698,7 +707,7 @@ class TelegramReportBot:
         self.application.add_handler(CommandHandler("accounts", account_manager.show_accounts))
         self.application.add_handler(CommandHandler("myreports", self.report_handler.my_reports))
         self.application.add_handler(CommandHandler("givetokens", give_tokens_command))
-        self.application.add_handler(CommandHandler("freetokens", freetokens_command))
+        self.application.add_handler(CommandHandler("freetokens", self.freetokens_command))
         
         # Admin commands
         self.application.add_handler(CommandHandler("admin", self.admin_handler.admin_panel))
