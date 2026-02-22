@@ -1,1 +1,22 @@
-hhhh
+# Core dependencies
+python-telegram-bot==20.7
+python-dotenv==1.0.0
+
+# Database
+motor==3.4.0
+pymongo==4.7.2
+
+# Async HTTP
+aiohttp==3.9.5
+
+# Security & Encryption
+cryptography==42.0.8
+pyotp==2.9.0
+
+# QR Code generation
+qrcode==7.4.2
+pillow==10.3.0
+
+# Utilities
+certifi==2024.7.4
+typing-extensions==4.12.2
