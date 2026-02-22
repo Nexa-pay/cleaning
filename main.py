@@ -31,7 +31,7 @@ import config
 
 # Import handlers
 from database import db
-from auth import AuthHandler, PHONE_NUMBER, ACCOUNT_NAME
+from auth import AuthHandler, PHONE_NUMBER, OTP_CODE, TWO_FA_PASSWORD, ACCOUNT_NAME  # Updated imports
 from payments import PaymentHandler
 from report_handler import ReportHandler, SELECT_ACCOUNT, REPORT_TYPE, REPORT_TARGET, REPORT_REASON, REPORT_DETAILS, CONFIRMATION, ADMIN_TARGET, ADMIN_REASON
 from admin_handler import AdminHandler
@@ -209,7 +209,10 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
             "Usage: `/givetokens <user_id> <amount>`\n"
-            "Example: `/givetokens 8289517006 100`",
+            "Example: `/givetokens 8289517006 100`\n\n"
+            "**Owner Commands:**\n"
+            "• `/addtokens @username 100` - Add tokens by username\n"
+            "• `/tokenstats` - View token statistics",
             parse_mode='Markdown'
         )
         return
@@ -251,6 +254,119 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Invalid user ID or amount.")
     except Exception as e:
         logger.error(f"Error: {e}")
+
+async def owner_add_tokens_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner command to add tokens (usage: /addtokens @username 100)"""
+    user_id = update.effective_user.id
+    
+    # Check if owner
+    if user_id not in config.OWNER_IDS and user_id != config.SUPER_ADMIN_ID:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/addtokens <username or user_id> <amount>`\n"
+            "Examples:\n"
+            "• `/addtokens @username 100`\n"
+            "• `/addtokens 123456789 100`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        target = context.args[0]
+        amount = int(context.args[1])
+        
+        if amount <= 0:
+            await update.message.reply_text("❌ Amount must be positive.")
+            return
+        
+        # Find user
+        target_id = None
+        if target.startswith('@'):
+            # Find by username
+            user = await db.get_user_by_username(target[1:])
+            if user:
+                target_id = user.user_id
+        else:
+            # Find by user ID
+            try:
+                target_id = int(target)
+            except ValueError:
+                await update.message.reply_text("❌ Invalid user ID or username.")
+                return
+        
+        if not target_id:
+            await update.message.reply_text(f"❌ User {target} not found.")
+            return
+        
+        # Add tokens
+        success = await db.update_user_tokens(target_id, amount)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ Added **{amount}** tokens to {target}\n"
+                f"User ID: `{target_id}`",
+                parse_mode='Markdown'
+            )
+            
+            # Notify user
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text=f"💰 **You received {amount} tokens from owner!**",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+        else:
+            await update.message.reply_text("❌ Failed to add tokens.")
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount. Use numbers only.")
+    except Exception as e:
+        logger.error(f"Error in addtokens: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+async def owner_token_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show token statistics"""
+    user_id = update.effective_user.id
+    
+    if user_id not in config.OWNER_IDS and user_id != config.SUPER_ADMIN_ID:
+        await update.message.reply_text("❌ Owner only command.")
+        return
+    
+    try:
+        total_users = await db.get_user_count()
+        total_tokens = 0
+        
+        if db and db.db:
+            pipeline = [
+                {"$match": {"status": "completed"}},
+                {"$group": {"_id": None, "total": {"$sum": "$tokens_purchased"}}}
+            ]
+            result = await db.db.transactions.aggregate(pipeline).to_list(1)
+            total_tokens = result[0]['total'] if result else 0
+        
+        await update.message.reply_text(
+            f"📊 **Token Statistics**\n\n"
+            f"**Total Users:** {total_users}\n"
+            f"**Total Tokens Issued:** {total_tokens}\n\n"
+            f"Use `/addtokens` to add tokens to users.",
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in token stats: {e}")
+        await update.message.reply_text("❌ Error fetching statistics.")
+
+async def handle_bulk_token_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle bulk token input"""
+    if context.user_data.get('awaiting_bulk_tokens'):
+        await self.admin_handler.process_bulk_tokens(update, context)
+    elif context.user_data.get('awaiting_token_input'):
+        await self.admin_handler.process_token_addition(update, context)
 
 # ========== MAIN BOT CLASS ==========
 class TelegramReportBot:
@@ -431,8 +547,10 @@ class TelegramReportBot:
             "/verify - Verify payments\n\n"
             
             "**Owner Commands:**\n"
-            "/givetokens - Give tokens to user\n"
-            "• Access Owner Panel for more"
+            "/givetokens - Give tokens by user ID\n"
+            "/addtokens - Add tokens by username/ID\n"
+            "/tokenstats - View token statistics\n"
+            "• Access Owner Panel for more features"
         )
         
         await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -709,16 +827,22 @@ class TelegramReportBot:
         self.application.add_handler(CommandHandler("givetokens", give_tokens_command))
         self.application.add_handler(CommandHandler("freetokens", self.freetokens_command))
         
+        # Owner token management commands
+        self.application.add_handler(CommandHandler("addtokens", owner_add_tokens_command))
+        self.application.add_handler(CommandHandler("tokenstats", owner_token_stats_command))
+        
         # Admin commands
         self.application.add_handler(CommandHandler("admin", self.admin_handler.admin_panel))
         self.application.add_handler(CommandHandler("stats", self.admin_handler.show_statistics))
         self.application.add_handler(CommandHandler("verify", self.payment_handler.admin_verify_payment))
         
-        # Login conversation
+        # Login conversation - UPDATED with new states
         login_conv = ConversationHandler(
             entry_points=[CommandHandler('login', self.auth_handler.start_login)],
             states={
                 PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.auth_handler.handle_phone)],
+                OTP_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.auth_handler.handle_otp)],
+                TWO_FA_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.auth_handler.handle_2fa_password)],
                 ACCOUNT_NAME: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.auth_handler.handle_account_name),
                     CommandHandler('skip', self.auth_handler.skip_account_name)
@@ -755,6 +879,12 @@ class TelegramReportBot:
         self.application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
             self.handle_owner_messages
+        ))
+        
+        # Bulk token input handler
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            handle_bulk_token_input
         ))
         
         # Callback query handlers - ORDER MATTERS!
