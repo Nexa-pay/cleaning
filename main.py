@@ -1,608 +1,761 @@
-#!/usr/bin/env python3
-"""
-Telegram Advanced Report Bot - Main Entry Point
-Complete solution with multi-account support, token system, and admin panel
-"""
-
+import motor.motor_asyncio
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
 import logging
+import uuid
 import asyncio
-import os
-import sys
-import threading
-import time
-from datetime import datetime
-from aiohttp import web
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
-    filters,
-    ContextTypes
-)
-from telegram.error import InvalidToken, Conflict
-
-# Import configuration
+from models import *
 import config
+from utils import encrypt_data, decrypt_data
 
-# Import handlers
-from database import db
-from auth import AuthHandler, PHONE_NUMBER, OTP_CODE, PASSWORD, TWO_FA_SETUP
-from payments import PaymentHandler
-from report_handler import ReportHandler, SELECT_ACCOUNT, REPORT_TYPE, REPORT_TARGET, REPORT_REASON, REPORT_DETAILS, CONFIRMATION, ADMIN_TARGET, ADMIN_REASON
-from admin_handler import AdminHandler
-from account_manager import account_manager
-from models import UserRole
-
-# Setup logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
 logger = logging.getLogger(__name__)
 
-# Healthcheck server
-async def handle_health(request):
-    """Handle healthcheck requests"""
-    return web.Response(text="OK", status=200)
-
-async def run_web_server():
-    """Run the healthcheck web server"""
-    app = web.Application()
-    app.router.add_get('/', handle_health)
-    app.router.add_get('/health', handle_health)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    logger.info("✅ Healthcheck server running on port 8080")
-    
-    # Keep the server running
-    await asyncio.Event().wait()
-
-def start_healthcheck_server():
-    """Start healthcheck server in a separate thread"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(run_web_server())
-    except Exception as e:
-        logger.error(f"Healthcheck server error: {e}")
-    finally:
-        loop.close()
-
-class TelegramReportBot:
+class Database:
     def __init__(self):
-        self.application = None
-        self.auth_handler = AuthHandler()
-        self.payment_handler = PaymentHandler()
-        self.report_handler = ReportHandler()
-        self.admin_handler = AdminHandler()
-        self._db_connected = False
-        self._start_time = time.time()
+        self.client = None
+        self.db = None
+        self._connection_attempts = 0
         
-    def check_config(self):
-        """Check if required configuration is present"""
-        if not config.BOT_TOKEN:
-            logger.error("=" * 50)
-            logger.error("BOT_TOKEN is not configured!")
-            logger.error("Please set the BOT_TOKEN environment variable")
-            logger.error("=" * 50)
-            return False
-        
-        if not config.MONGODB_URI:
-            logger.error("=" * 50)
-            logger.error("MONGODB_URI is not configured!")
-            logger.error("Please set the MONGODB_URI environment variable")
-            logger.error("=" * 50)
-            return False
-            
-        return True
-    
-    async def get_user_role(self, user_id: int) -> str:
-        """Determine user role based on config"""
-        if user_id == config.SUPER_ADMIN_ID:
-            return "SUPER ADMIN"
-        elif user_id in config.OWNER_IDS:
-            return "OWNER"
-        elif user_id in config.ADMIN_IDS:
-            return "ADMIN"
-        else:
-            return "NORMAL USER"
-    
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Send welcome message with inline buttons"""
+    async def connect(self):
+        """Connect to MongoDB with retry logic"""
         try:
-            user = update.effective_user
-            user_id = user.id
-            
-            # Log the user ID for debugging
-            logger.info(f"User {user_id} started the bot")
-            
-            # Determine user role
-            user_role = await self.get_user_role(user_id)
-            
-            # Get or create user in database with error handling
-            tokens = 0
-            total_reports = 0
-            
-            try:
-                # Ensure database connection
-                if not self._db_connected:
-                    await db.ensure_connection()
-                    
-                db_user = await db.get_user(user_id)
-                if not db_user:
-                    db_user = await db.create_user(
-                        user_id=user_id,
-                        username=user.username,
-                        first_name=user.first_name,
-                        last_name=user.last_name
-                    )
+            if not config.MONGODB_URI:
+                logger.error("❌ MONGODB_URI not set in environment variables!")
+                return False
                 
-                if db_user:
-                    tokens = getattr(db_user, 'tokens', 0)
-                    total_reports = getattr(db_user, 'total_reports', 0)
-                    
+            logger.info(f"🔄 Attempting to connect to MongoDB...")
+            
+            # Connect with timeout
+            self.client = motor.motor_asyncio.AsyncIOMotorClient(
+                config.MONGODB_URI,
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=5000
+            )
+            
+            # Test connection
+            await self.client.admin.command('ping')
+            logger.info("✅ MongoDB ping successful!")
+            
+            # Get database
+            self.db = self.client[config.DATABASE_NAME]
+            logger.info(f"✅ Using database: {config.DATABASE_NAME}")
+            
+            # Initialize default data
+            await self._init_default_data()
+            
+            # Create indexes (with error handling)
+            try:
+                await self._create_indexes()
+                logger.info("✅ Database indexes created successfully!")
             except Exception as e:
-                logger.error(f"Database error in start: {e}")
-                # Fallback values if database fails
+                logger.error(f"⚠️ Index creation warning: {e}")
             
-            # Create welcome message
-            welcome_text = (
-                f"👋 **Welcome {user.first_name}!**\n\n"
-                f"🆔 **User ID:** `{user_id}`\n"
-                f"💰 **Tokens:** {tokens}\n"
-                f"📊 **Reports Made:** {total_reports}\n"
-                f"👑 **Role:** {user_role}\n\n"
-                "I'm a comprehensive reporting bot that helps you report:\n"
-                "• 👤 Suspicious users\n"
-                "• 👥 Problematic groups\n"
-                "• 📢 Violating channels\n\n"
-                "**Select an option below:**"
-            )
-            
-            # Create inline keyboard
-            keyboard = [
-                [
-                    InlineKeyboardButton("📝 Report", callback_data="menu_report"),
-                    InlineKeyboardButton("💰 Buy Tokens", callback_data="menu_buy")
-                ],
-                [
-                    InlineKeyboardButton("📱 Accounts", callback_data="menu_accounts"),
-                    InlineKeyboardButton("📊 My Reports", callback_data="menu_myreports")
-                ],
-                [
-                    InlineKeyboardButton("ℹ️ Help", callback_data="menu_help"),
-                    InlineKeyboardButton("📞 Contact", callback_data="menu_contact")
-                ]
-            ]
-            
-            # Add admin button for admins/owners/super admin
-            if user_role in ["ADMIN", "OWNER", "SUPER ADMIN"]:
-                keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="menu_admin")])
-                logger.info(f"✅ Admin panel button added for user {user_id}")
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                welcome_text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+            logger.info("✅ Database connected successfully")
+            return True
             
         except Exception as e:
-            logger.error(f"Error in start command: {e}", exc_info=True)
-            try:
-                await update.message.reply_text(
-                    "👋 Welcome! The bot is starting up. Please try again in a few seconds.\n\n"
-                    f"If this persists, contact @{config.CONTACT_INFO.get('admin_username', 'admin')}"
-                )
-            except:
-                pass
+            logger.error(f"❌ Database connection failed: {e}")
+            self.client = None
+            self.db = None
+            return False
     
-    async def whoami_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Check your role and permissions"""
-        try:
-            user_id = update.effective_user.id
-            
-            # Check roles directly from config
-            is_super = (user_id == config.SUPER_ADMIN_ID)
-            is_owner = (user_id in config.OWNER_IDS)
-            is_admin = (user_id in config.ADMIN_IDS)
-            
-            # Determine primary role
-            if is_super:
-                role = "SUPER ADMIN"
-            elif is_owner:
-                role = "OWNER"
-            elif is_admin:
-                role = "ADMIN"
-            else:
-                role = "NORMAL USER"
-            
-            # Get database status
-            db_status = "✅ Connected" if self._db_connected else "❌ Disconnected"
-            uptime = time.time() - self._start_time
-            uptime_str = f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m"
-            
-            message = (
-                f"👤 **Your Information**\n\n"
-                f"**User ID:** `{user_id}`\n"
-                f"**Your Role:** `{role}`\n"
-                f"**Bot Uptime:** `{uptime_str}`\n"
-                f"**Database:** {db_status}\n\n"
-                f"**Permission Checks:**\n"
-                f"• Is Super Admin: {'✅ Yes' if is_super else '❌ No'}\n"
-                f"• Is Owner: {'✅ Yes' if is_owner else '❌ No'}\n"
-                f"• Is Admin: {'✅ Yes' if is_admin else '❌ No'}\n\n"
-                f"**Config Values:**\n"
-                f"ADMIN_IDS: `{config.ADMIN_IDS}`\n"
-                f"OWNER_IDS: `{config.OWNER_IDS}`\n"
-                f"SUPER_ADMIN_ID: `{config.SUPER_ADMIN_ID}`"
-            )
-            
-            await update.message.reply_text(message, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Error in whoami command: {e}")
-            await update.message.reply_text("❌ Error checking your information.")
-    
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show help information"""
-        help_text = (
-            "📚 **Bot Commands**\n\n"
-            "**User Commands:**\n"
-            "/start - Start the bot\n"
-            "/help - Show this help\n"
-            "/whoami - Check your role\n"
-            "/login - Add Telegram account\n"
-            "/accounts - Manage accounts\n"
-            "/report - Start reporting\n"
-            "/myreports - View your reports\n"
-            "/buy - Purchase tokens\n"
-            "/balance - Check token balance\n"
-            "/contact - Contact support\n\n"
-            
-            "**Admin Commands:**\n"
-            "/admin - Open admin panel\n"
-            "/stats - View statistics\n"
-            "/users - Manage users\n"
-            "/reports - View all reports\n"
-            "/verify - Verify payments\n\n"
-            
-            "**How to Report:**\n"
-            "1. Add an account using /login\n"
-            "2. Buy tokens with /buy\n"
-            "3. Start report with /report\n"
-            "4. Select target and reason\n"
-            "5. Confirm and submit\n\n"
-            
-            f"**Support:** @{config.CONTACT_INFO.get('admin_username', 'admin')}"
-        )
-        
-        await update.message.reply_text(help_text, parse_mode='Markdown')
-    
-    async def balance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Check user balance"""
-        try:
-            user_id = update.effective_user.id
-            
-            # Ensure database connection
-            if not self._db_connected:
-                await db.ensure_connection()
-            
-            user = await db.get_user(user_id)
-            
-            if not user:
-                user = await db.create_user(
-                    user_id=user_id,
-                    username=update.effective_user.username,
-                    first_name=update.effective_user.first_name
-                )
-            
-            balance_text = (
-                f"💰 **Your Balance**\n\n"
-                f"**Tokens:** `{getattr(user, 'tokens', 0)}`\n"
-                f"**Reports Made:** `{getattr(user, 'total_reports', 0)}`\n"
-                f"**Account Type:** `{await self.get_user_role(user_id)}`\n\n"
-                f"Use /buy to purchase more tokens."
-            )
-            
-            await update.message.reply_text(balance_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            logger.error(f"Error in balance command: {e}")
-            await update.message.reply_text(
-                "❌ Error checking balance. Please try again later."
-            )
-    
-    async def contact_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show contact information"""
-        contact_text = (
-            "📞 **Contact Information**\n\n"
-            f"**Admin:** @{config.CONTACT_INFO.get('admin_username', 'admin')}\n"
-            f"**Owner:** @{config.CONTACT_INFO.get('owner_username', 'owner')}\n"
-            f"**Support Group:** [Join here]({config.CONTACT_INFO.get('support_group', 'https://t.me/support')})\n"
-            f"**Channel:** [Follow updates]({config.CONTACT_INFO.get('channel', 'https://t.me/channel')})\n"
-            f"**Email:** `{config.CONTACT_INFO.get('email', 'support@example.com')}`\n\n"
-            "Feel free to reach out for any issues or questions!"
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton("📢 Support Group", url=config.CONTACT_INFO.get('support_group', 'https://t.me/support'))],
-            [InlineKeyboardButton("📱 Channel", url=config.CONTACT_INFO.get('channel', 'https://t.me/channel'))]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            contact_text,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-    
-    async def menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle menu button callbacks"""
-        query = update.callback_query
-        await query.answer()
-        
-        data = query.data
-        user_id = update.effective_user.id
-        
-        logger.info(f"Menu callback: {data} from user {user_id}")
-        
-        try:
-            # Check admin access for admin panel
-            if data == "menu_admin":
-                # Check if user has admin privileges directly from config
-                is_admin = (user_id == config.SUPER_ADMIN_ID or 
-                           user_id in config.OWNER_IDS or 
-                           user_id in config.ADMIN_IDS)
-                
-                if not is_admin:
-                    await query.message.reply_text("❌ You don't have admin access.")
-                    return
-                
-                await query.message.delete()
-                await self.admin_handler.admin_panel(update, context)
-                return
-            
-            # Handle other menu options
-            if data == "menu_report":
-                await query.message.delete()
-                context.user_data['from_menu'] = True
-                await self.report_handler.start_report(update, context)
-                
-            elif data == "menu_buy":
-                await query.message.delete()
-                await self.payment_handler.show_token_packages(update, context)
-                
-            elif data == "menu_accounts":
-                await query.message.delete()
-                await account_manager.show_accounts(update, context)
-                
-            elif data == "menu_myreports":
-                await query.message.delete()
-                await self.report_handler.my_reports(update, context)
-                
-            elif data == "menu_help":
-                await query.message.delete()
-                await self.help_command(update, context)
-                
-            elif data == "menu_contact":
-                await query.message.delete()
-                await self.contact_command(update, context)
-                
-            elif data == "back_to_main":
-                await query.message.delete()
-                await self.start(update, context)
-                
-        except Exception as e:
-            logger.error(f"Error in menu callback: {e}", exc_info=True)
-            try:
-                await query.message.reply_text(
-                    "❌ An error occurred. Please try again or use /start"
-                )
-            except:
-                pass
-    
-    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle errors gracefully"""
-        error = context.error
-        
-        # Ignore Conflict errors (multiple instances)
-        if isinstance(error, Conflict):
-            logger.debug("Conflict error ignored (multiple bot instances)")
+    async def _create_indexes(self):
+        """Create database indexes"""
+        if not self.db:
             return
             
-        logger.error(f"Update {update} caused error {error}")
+        # Users collection indexes
+        await self.db.users.create_index("user_id", unique=True)
         
-        try:
-            if update and update.effective_message:
-                await update.effective_message.reply_text(
-                    "❌ An error occurred. Our team has been notified.\n"
-                    "Please try again later or contact support."
-                )
-        except:
-            pass
+        # Accounts collection indexes
+        await self.db.accounts.create_index([("user_id", 1), ("account_id", 1)], unique=True)
+        
+        # Sessions collection indexes
+        await self.db.sessions.create_index("session_id", unique=True)
+        await self.db.sessions.create_index("expires_at", expireAfterSeconds=0)
+        
+        # Transactions collection indexes
+        await self.db.transactions.create_index("transaction_id", unique=True)
+        
+        # Reports collection indexes
+        await self.db.reports.create_index("report_id", unique=True)
+        await self.db.reports.create_index([("user_id", 1), ("created_at", -1)])
+        await self.db.reports.create_index([("status", 1), ("created_at", -1)])
+        
+        # Token packages indexes
+        await self.db.token_packages.create_index("package_id", unique=True)
+        
+        # Report templates indexes
+        await self.db.report_templates.create_index("template_id", unique=True)
     
-    async def post_init(self, application: Application):
-        """Run after bot initialization"""
-        logger.info("Bot is starting up...")
+    async def _init_default_data(self):
+        """Initialize default data in database"""
+        if not self.db:
+            return
+            
+        # Initialize token packages if not exist
+        packages = self._get_default_packages()
+        for package in packages:
+            existing = await self.db.token_packages.find_one({"package_id": package.package_id})
+            if not existing:
+                await self.db.token_packages.insert_one(package.__dict__)
         
-        # Log configuration for debugging
-        logger.info(f"ADMIN_IDS: {config.ADMIN_IDS}")
-        logger.info(f"OWNER_IDS: {config.OWNER_IDS}")
-        logger.info(f"SUPER_ADMIN_ID: {config.SUPER_ADMIN_ID}")
-        logger.info(f"MONGODB_URI: {config.MONGODB_URI[:30]}...")
+        # Initialize report templates if not exist
+        templates = [
+            {
+                "template_id": "spam",
+                "name": "Spam Report",
+                "category": "spam",
+                "content": "This account is sending spam messages including promotional content and unwanted advertisements.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "scam",
+                "name": "Scam Report",
+                "category": "scam",
+                "content": "This account is attempting to scam users by promising fake rewards and requesting personal information.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "harassment",
+                "name": "Harassment Report",
+                "category": "harassment",
+                "content": "This user is engaging in harassment, bullying, and making threats against others.",
+                "created_by": 0,
+                "is_public": True
+            }
+        ]
         
-        # Start healthcheck server in a background thread
+        for template in templates:
+            existing = await self.db.report_templates.find_one({"template_id": template["template_id"]})
+            if not existing:
+                await self.db.report_templates.insert_one(template)
+    
+    async def ensure_connection(self):
+        """Ensure database is connected, attempt reconnection if needed"""
+        if not self.db or not self.client:
+            logger.warning("⚠️ Database not connected, attempting reconnection...")
+            return await self.connect()
+        return True
+    
+    # ========== User Methods ==========
+    
+    async def get_user(self, user_id: int) -> Optional[User]:
+        """Get user by ID"""
+        if not await self.ensure_connection():
+            return None
+            
         try:
-            health_thread = threading.Thread(target=start_healthcheck_server, daemon=True)
-            health_thread.start()
-            logger.info("✅ Healthcheck thread started")
+            user_data = await self.db.users.find_one({"user_id": user_id})
+            if user_data:
+                return User.from_dict(user_data)
+            return None
         except Exception as e:
-            logger.error(f"Failed to start healthcheck server: {e}")
-        
-        # Connect to database with retry
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Database connection attempt {attempt + 1}/{max_retries}")
-                connected = await db.connect()
-                if connected:
-                    self._db_connected = True
-                    logger.info("✅ Database connected successfully!")
-                    break
-                else:
-                    logger.warning(f"Database connection attempt {attempt + 1} failed")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(3)  # Wait 3 seconds before retry
-            except Exception as e:
-                logger.error(f"Database connection error on attempt {attempt + 1}: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(3)
-        
-        if not self._db_connected:
-            logger.warning("⚠️ Bot running in limited mode without database")
-        
-        logger.info("Bot started successfully!")
+            logger.error(f"Error getting user {user_id}: {e}")
+            return None
     
-    async def post_shutdown(self, application: Application):
-        """Run before bot shutdown"""
-        logger.info("Bot is shutting down...")
+    async def create_user(self, user_id: int, username: str, first_name: str, 
+                         last_name: str = None, referred_by: int = None) -> Optional[User]:
+        """Create new user"""
+        if not await self.ensure_connection():
+            # Return a temporary user object even if database fails
+            return User(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                role=UserRole.NORMAL,
+                tokens=0
+            )
         
-        # Close database connection
-        if db.client:
-            db.client.close()
-            logger.info("Database connection closed.")
-    
-    def setup(self):
-        """Setup bot handlers"""
-        if not self.check_config():
-            sys.exit(1)
-        
-        # Create application with custom settings
-        builder = Application.builder().token(config.BOT_TOKEN)
-        
-        # Add post init/shutdown
-        builder.post_init(self.post_init)
-        builder.post_shutdown(self.post_shutdown)
-        
-        # Build application
-        self.application = builder.build()
-        
-        # Basic command handlers
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("help", self.help_command))
-        self.application.add_handler(CommandHandler("whoami", self.whoami_command))
-        self.application.add_handler(CommandHandler("balance", self.balance_command))
-        self.application.add_handler(CommandHandler("contact", self.contact_command))
-        self.application.add_handler(CommandHandler("buy", self.payment_handler.show_token_packages))
-        self.application.add_handler(CommandHandler("accounts", account_manager.show_accounts))
-        self.application.add_handler(CommandHandler("myreports", self.report_handler.my_reports))
-        
-        # Admin commands
-        self.application.add_handler(CommandHandler("admin", self.admin_handler.admin_panel))
-        self.application.add_handler(CommandHandler("stats", self.admin_handler.show_statistics))
-        self.application.add_handler(CommandHandler("verify", self.payment_handler.admin_verify_payment))
-        
-        # Login conversation handler
-        login_conv = ConversationHandler(
-            entry_points=[CommandHandler('login', self.auth_handler.start_login)],
-            states={
-                PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.auth_handler.handle_phone)],
-                OTP_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.auth_handler.handle_otp)],
-                PASSWORD: [CallbackQueryHandler(self.auth_handler.handle_2fa_choice, pattern='^2fa_')],
-                TWO_FA_SETUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.auth_handler.handle_2fa_password)],
-            },
-            fallbacks=[CommandHandler('cancel', self.auth_handler.cancel_login)],
-        )
-        self.application.add_handler(login_conv)
-        
-        # Report conversation handler
-        report_conv = ConversationHandler(
-            entry_points=[
-                CommandHandler('report', self.report_handler.start_report),
-                CallbackQueryHandler(self.report_handler.start_report, pattern='^menu_report$')
-            ],
-            states={
-                SELECT_ACCOUNT: [CallbackQueryHandler(self.report_handler.handle_account_selection, pattern='^(select_acc_|add_account|cancel_report)$')],
-                REPORT_TYPE: [CallbackQueryHandler(self.report_handler.handle_report_type, pattern='^(report_type_|cancel_report)$')],
-                REPORT_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.report_handler.handle_target)],
-                REPORT_REASON: [CallbackQueryHandler(self.report_handler.handle_reason, pattern='^(reason_template_|reason_custom|cancel_report)$')],
-                REPORT_DETAILS: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.report_handler.handle_details),
-                    CommandHandler('skip', self.report_handler.skip_details)
-                ],
-                CONFIRMATION: [CallbackQueryHandler(self.report_handler.submit_report, pattern='^(confirm_report|cancel_report)$')],
-                ADMIN_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.report_handler.handle_admin_target)],
-                ADMIN_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.report_handler.handle_admin_reason)],
-            },
-            fallbacks=[CommandHandler('cancel', self.report_handler.cancel)],
-        )
-        self.application.add_handler(report_conv)
-        
-        # Callback query handlers
-        self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^menu_'))
-        self.application.add_handler(CallbackQueryHandler(account_manager.handle_account_callback, pattern='^(add_account|refresh_accounts|manage_acc_|activate_acc_|deactivate_acc_|set_primary_|rename_acc_|delete_acc_|acc_reports_|confirm_delete_|back_accounts)$'))
-        self.application.add_handler(CallbackQueryHandler(self.payment_handler.handle_package_selection, pattern='^(buy_stars_|buy_upi_|check_balance)$'))
-        self.application.add_handler(CallbackQueryHandler(self.payment_handler.confirm_payment, pattern='^(confirm_stars_|confirm_upi_|cancel_payment)$'))
-        self.application.add_handler(CallbackQueryHandler(self.admin_handler.handle_admin_callback, pattern='^admin_'))
-        
-        # Error handler
-        self.application.add_error_handler(self.error_handler)
-        
-        logger.info("Bot handlers setup complete")
-    
-    async def run(self):
-        """Run the bot"""
         try:
-            await self.application.initialize()
-            await self.application.start()
-            await self.application.updater.start_polling(
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES
+            # Determine role
+            role = UserRole.NORMAL
+            if user_id in config.OWNER_IDS:
+                role = UserRole.OWNER
+            elif user_id in config.ADMIN_IDS:
+                role = UserRole.ADMIN
+            elif user_id == config.SUPER_ADMIN_ID:
+                role = UserRole.SUPER_ADMIN
+                
+            user = User(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                role=role,
+                tokens=config.FREE_REPORTS_FOR_NEW_USERS,
+                referred_by=referred_by
             )
             
-            logger.info(f"✅ Bot is running. Press Ctrl+C to stop.")
+            await self.db.users.insert_one(user.to_dict())
+            logger.info(f"✅ New user created: {user_id} ({username})")
+            return user
+        except Exception as e:
+            logger.error(f"Error creating user {user_id}: {e}")
+            # Return temporary user
+            return User(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                role=UserRole.NORMAL,
+                tokens=0
+            )
+    
+    async def update_user(self, user_id: int, updates: dict) -> bool:
+        """Update user information"""
+        if not await self.ensure_connection():
+            return False
             
-            # Keep running
-            while True:
-                await asyncio.sleep(1)
-                
-        except KeyboardInterrupt:
-            logger.info("Stopping bot...")
-        except Exception as e:
-            logger.error(f"Fatal error: {e}", exc_info=True)
-        finally:
-            await self.stop()
-    
-    async def stop(self):
-        """Stop the bot gracefully"""
         try:
-            await self.application.updater.stop()
-            await self.application.stop()
-            await self.application.shutdown()
-            logger.info("Bot stopped successfully")
+            result = await self.db.users.update_one(
+                {"user_id": user_id},
+                {"$set": updates}
+            )
+            return result.modified_count > 0
         except Exception as e:
-            logger.error(f"Error stopping bot: {e}")
-
-def main():
-    """Main entry point"""
-    bot = TelegramReportBot()
-    bot.setup()
+            logger.error(f"Error updating user {user_id}: {e}")
+            return False
     
-    try:
-        asyncio.run(bot.run())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+    async def update_user_tokens(self, user_id: int, tokens_change: int) -> bool:
+        """Update user tokens (positive for add, negative for deduct)"""
+        if not await self.ensure_connection():
+            return False
+            
+        try:
+            result = await self.db.users.update_one(
+                {"user_id": user_id},
+                {"$inc": {"tokens": tokens_change}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error updating tokens for {user_id}: {e}")
+            return False
+    
+    async def add_report_count(self, user_id: int):
+        """Increment user's report count"""
+        if not await self.ensure_connection():
+            return
+            
+        try:
+            await self.db.users.update_one(
+                {"user_id": user_id},
+                {
+                    "$inc": {"total_reports": 1},
+                    "$set": {"last_active": datetime.now()}
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error adding report count for {user_id}: {e}")
+    
+    async def get_user_count(self) -> int:
+        """Get total user count"""
+        if not await self.ensure_connection():
+            return 0
+            
+        try:
+            return await self.db.users.count_documents({})
+        except Exception as e:
+            logger.error(f"Error getting user count: {e}")
+            return 0
+    
+    async def block_user(self, user_id: int) -> bool:
+        """Block a user"""
+        if not await self.ensure_connection():
+            return False
+            
+        try:
+            result = await self.db.users.update_one(
+                {"user_id": user_id},
+                {"$set": {"is_blocked": True}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error blocking user {user_id}: {e}")
+            return False
+    
+    async def unblock_user(self, user_id: int) -> bool:
+        """Unblock a user"""
+        if not await self.ensure_connection():
+            return False
+            
+        try:
+            result = await self.db.users.update_one(
+                {"user_id": user_id},
+                {"$set": {"is_blocked": False}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error unblocking user {user_id}: {e}")
+            return False
+    
+    # ========== Account Methods ==========
+    
+    async def get_user_accounts(self, user_id: int) -> List[TelegramAccount]:
+        """Get all accounts for a user"""
+        if not await self.ensure_connection():
+            return []
+            
+        try:
+            cursor = self.db.accounts.find({"user_id": user_id})
+            accounts = []
+            async for doc in cursor:
+                accounts.append(TelegramAccount.from_dict(doc))
+            return accounts
+        except Exception as e:
+            logger.error(f"Error getting accounts for {user_id}: {e}")
+            return []
+    
+    async def get_account(self, account_id: str) -> Optional[TelegramAccount]:
+        """Get account by ID"""
+        if not await self.ensure_connection():
+            return None
+            
+        try:
+            account_data = await self.db.accounts.find_one({"account_id": account_id})
+            if account_data:
+                return TelegramAccount.from_dict(account_data)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting account {account_id}: {e}")
+            return None
+    
+    async def update_account_status(self, account_id: str, status: AccountStatus) -> bool:
+        """Update account status"""
+        if not await self.ensure_connection():
+            return False
+            
+        try:
+            result = await self.db.accounts.update_one(
+                {"account_id": account_id},
+                {"$set": {"status": status.value}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error updating account {account_id}: {e}")
+            return False
+    
+    async def set_primary_account(self, user_id: int, account_id: str) -> bool:
+        """Set an account as primary"""
+        if not await self.ensure_connection():
+            return False
+            
+        try:
+            # Remove primary from all accounts
+            await self.db.accounts.update_many(
+                {"user_id": user_id},
+                {"$set": {"is_primary": False}}
+            )
+            
+            # Set new primary
+            result = await self.db.accounts.update_one(
+                {"account_id": account_id, "user_id": user_id},
+                {"$set": {"is_primary": True}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error setting primary account: {e}")
+            return False
+    
+    # ========== Report Methods ==========
+    
+    async def create_report(self, user_id: int, account_id: str, report_type: str,
+                          target: str, reason: str, details: str,
+                          tokens_used: int = 1, evidence: List[str] = None) -> Optional[Report]:
+        """Create a new report"""
+        if not await self.ensure_connection():
+            # Return a temporary report
+            return Report(
+                report_id=str(uuid.uuid4()).replace('-', '')[:12].upper(),
+                user_id=user_id,
+                account_id=account_id,
+                report_type=report_type,
+                target=target,
+                reason=reason,
+                details=details,
+                status=ReportStatus.PENDING,
+                tokens_used=tokens_used,
+                evidence=evidence or []
+            )
+            
+        try:
+            report = Report(
+                report_id=str(uuid.uuid4()).replace('-', '')[:12].upper(),
+                user_id=user_id,
+                account_id=account_id,
+                report_type=report_type,
+                target=target,
+                reason=reason,
+                details=details,
+                status=ReportStatus.PENDING,
+                tokens_used=tokens_used,
+                evidence=evidence or []
+            )
+            
+            await self.db.reports.insert_one(report.to_dict())
+            logger.info(f"✅ New report created: {report.report_id}")
+            return report
+        except Exception as e:
+            logger.error(f"Error creating report: {e}")
+            return None
+    
+    async def get_user_reports(self, user_id: int, page: int = 1) -> List[Report]:
+        """Get user's reports with pagination"""
+        if not await self.ensure_connection():
+            return []
+            
+        try:
+            skip = (page - 1) * config.REPORTS_PER_PAGE
+            cursor = self.db.reports.find({"user_id": user_id})\
+                                   .sort("created_at", -1)\
+                                   .skip(skip)\
+                                   .limit(config.REPORTS_PER_PAGE)
+            
+            reports = []
+            async for doc in cursor:
+                reports.append(Report.from_dict(doc))
+            return reports
+        except Exception as e:
+            logger.error(f"Error getting reports for {user_id}: {e}")
+            return []
+    
+    async def get_pending_reports(self, limit: int = 50) -> List[Report]:
+        """Get pending reports for admin"""
+        if not await self.ensure_connection():
+            return []
+            
+        try:
+            cursor = self.db.reports.find({"status": ReportStatus.PENDING.value})\
+                                   .sort("created_at", 1)\
+                                   .limit(limit)
+            
+            reports = []
+            async for doc in cursor:
+                reports.append(Report.from_dict(doc))
+            return reports
+        except Exception as e:
+            logger.error(f"Error getting pending reports: {e}")
+            return []
+    
+    async def update_report_status(self, report_id: str, status: ReportStatus,
+                                  reviewed_by: int, result: str = None) -> bool:
+        """Update report status"""
+        if not await self.ensure_connection():
+            return False
+            
+        try:
+            update_data = {
+                "$set": {
+                    "status": status.value,
+                    "reviewed_by": reviewed_by,
+                    "reviewed_at": datetime.now()
+                }
+            }
+            if result:
+                update_data["$set"]["result"] = result
+                
+            result = await self.db.reports.update_one(
+                {"report_id": report_id},
+                update_data
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error updating report {report_id}: {e}")
+            return False
+    
+    # ========== Transaction Methods ==========
+    
+    async def create_transaction(self, user_id: int, amount: float, currency: str,
+                                tokens: int, payment_method: str) -> Optional[Transaction]:
+        """Create a new transaction"""
+        if not await self.ensure_connection():
+            return Transaction(
+                transaction_id=str(uuid.uuid4()).replace('-', '')[:16].upper(),
+                user_id=user_id,
+                amount=amount,
+                currency=currency,
+                tokens_purchased=tokens,
+                payment_method=payment_method,
+                status="pending"
+            )
+            
+        try:
+            transaction = Transaction(
+                transaction_id=str(uuid.uuid4()).replace('-', '')[:16].upper(),
+                user_id=user_id,
+                amount=amount,
+                currency=currency,
+                tokens_purchased=tokens,
+                payment_method=payment_method,
+                status="pending"
+            )
+            await self.db.transactions.insert_one(transaction.__dict__)
+            return transaction
+        except Exception as e:
+            logger.error(f"Error creating transaction: {e}")
+            return None
+    
+    async def get_transaction(self, transaction_id: str) -> Optional[Transaction]:
+        """Get transaction by ID"""
+        if not await self.ensure_connection():
+            return None
+            
+        try:
+            transaction_data = await self.db.transactions.find_one({"transaction_id": transaction_id})
+            if transaction_data:
+                return Transaction(**transaction_data)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting transaction {transaction_id}: {e}")
+            return None
+    
+    async def complete_transaction(self, transaction_id: str, payment_details: Dict = None) -> bool:
+        """Mark transaction as completed"""
+        if not await self.ensure_connection():
+            return False
+            
+        try:
+            update_data = {
+                "$set": {
+                    "status": "completed",
+                    "completed_at": datetime.now()
+                }
+            }
+            if payment_details:
+                update_data["$set"]["payment_details"] = payment_details
+                
+            result = await self.db.transactions.update_one(
+                {"transaction_id": transaction_id},
+                update_data
+            )
+            
+            if result.modified_count > 0:
+                # Get transaction to add tokens to user
+                transaction = await self.get_transaction(transaction_id)
+                if transaction:
+                    await self.update_user_tokens(transaction.user_id, transaction.tokens_purchased)
+                    logger.info(f"✅ Transaction {transaction_id} completed")
+            
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error completing transaction {transaction_id}: {e}")
+            return False
+    
+    async def get_user_transactions(self, user_id: int, limit: int = 10) -> List[Transaction]:
+        """Get user's transactions"""
+        if not await self.ensure_connection():
+            return []
+            
+        try:
+            cursor = self.db.transactions.find({"user_id": user_id})\
+                                        .sort("created_at", -1)\
+                                        .limit(limit)
+            transactions = []
+            async for doc in cursor:
+                transactions.append(Transaction(**doc))
+            return transactions
+        except Exception as e:
+            logger.error(f"Error getting transactions for {user_id}: {e}")
+            return []
+    
+    # ========== Token Packages Methods ==========
+    
+    async def get_token_packages(self) -> List[TokenPackage]:
+        """Get all active token packages"""
+        if not await self.ensure_connection():
+            # Return default packages if database not connected
+            return self._get_default_packages()
+            
+        try:
+            cursor = self.db.token_packages.find({"is_active": True}).sort("tokens", 1)
+            packages = []
+            async for doc in cursor:
+                packages.append(TokenPackage(**doc))
+            return packages if packages else self._get_default_packages()
+        except Exception as e:
+            logger.error(f"Error getting token packages: {e}")
+            return self._get_default_packages()
+    
+    async def get_package(self, package_id: str) -> Optional[TokenPackage]:
+        """Get package by ID"""
+        if not await self.ensure_connection():
+            return None
+            
+        try:
+            package_data = await self.db.token_packages.find_one({"package_id": package_id})
+            if package_data:
+                return TokenPackage(**package_data)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting package {package_id}: {e}")
+            return None
+    
+    def _get_default_packages(self):
+        """Return default token packages"""
+        return [
+            TokenPackage(
+                package_id="basic",
+                name="Basic Pack",
+                tokens=5,
+                price_stars=50,
+                price_inr=50,
+                description="5 reports - Perfect for testing"
+            ),
+            TokenPackage(
+                package_id="standard",
+                name="Standard Pack",
+                tokens=15,
+                price_stars=120,
+                price_inr=120,
+                description="15 reports - Most popular choice"
+            ),
+            TokenPackage(
+                package_id="premium",
+                name="Premium Pack",
+                tokens=30,
+                price_stars=200,
+                price_inr=200,
+                description="30 reports - Great value"
+            ),
+            TokenPackage(
+                package_id="pro",
+                name="Pro Pack",
+                tokens=100,
+                price_stars=500,
+                price_inr=500,
+                description="100 reports - For power users"
+            )
+        ]
+    
+    # ========== Template Methods ==========
+    
+    async def get_templates(self, category: str = None) -> List[ReportTemplate]:
+        """Get report templates"""
+        if not await self.ensure_connection():
+            return []
+            
+        try:
+            query = {"is_public": True}
+            if category:
+                query["category"] = category
+                
+            cursor = self.db.report_templates.find(query).sort("name", 1)
+            templates = []
+            async for doc in cursor:
+                templates.append(ReportTemplate(**doc))
+            return templates
+        except Exception as e:
+            logger.error(f"Error getting templates: {e}")
+            return []
+    
+    async def get_template(self, template_id: str) -> Optional[ReportTemplate]:
+        """Get template by ID"""
+        if not await self.ensure_connection():
+            return None
+            
+        try:
+            template_data = await self.db.report_templates.find_one({"template_id": template_id})
+            if template_data:
+                return ReportTemplate(**template_data)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting template {template_id}: {e}")
+            return None
+    
+    # ========== Statistics Methods ==========
+    
+    async def get_account_stats(self) -> dict:
+        """Get account statistics"""
+        if not await self.ensure_connection():
+            return {"total": 0, "active": 0, "users_with_accounts": 0}
+            
+        try:
+            total = await self.db.accounts.count_documents({})
+            active = await self.db.accounts.count_documents({"status": AccountStatus.ACTIVE.value})
+            users_with_accounts = len(await self.db.accounts.distinct("user_id"))
+            
+            return {
+                "total": total,
+                "active": active,
+                "users_with_accounts": users_with_accounts
+            }
+        except Exception as e:
+            logger.error(f"Error getting account stats: {e}")
+            return {"total": 0, "active": 0, "users_with_accounts": 0}
+    
+    async def get_report_stats(self) -> dict:
+        """Get report statistics"""
+        if not await self.ensure_connection():
+            return {"total": 0, "pending": 0, "reviewed": 0, "resolved": 0, "rejected": 0, "today": 0, "by_type": {}}
+            
+        try:
+            total = await self.db.reports.count_documents({})
+            pending = await self.db.reports.count_documents({"status": ReportStatus.PENDING.value})
+            reviewed = await self.db.reports.count_documents({"status": ReportStatus.REVIEWED.value})
+            resolved = await self.db.reports.count_documents({"status": ReportStatus.RESOLVED.value})
+            rejected = await self.db.reports.count_documents({"status": ReportStatus.REJECTED.value})
+            
+            # Today's reports
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today = await self.db.reports.count_documents({"created_at": {"$gte": today_start}})
+            
+            # Reports by type
+            pipeline = [
+                {"$group": {"_id": "$report_type", "count": {"$sum": 1}}}
+            ]
+            by_type = {}
+            async for doc in self.db.reports.aggregate(pipeline):
+                by_type[doc["_id"]] = doc["count"]
+            
+            return {
+                "total": total,
+                "pending": pending,
+                "reviewed": reviewed,
+                "resolved": resolved,
+                "rejected": rejected,
+                "today": today,
+                "by_type": by_type
+            }
+        except Exception as e:
+            logger.error(f"Error getting report stats: {e}")
+            return {"total": 0, "pending": 0, "reviewed": 0, "resolved": 0, "rejected": 0, "today": 0, "by_type": {}}
+    
+    async def get_bot_stats(self) -> dict:
+        """Get comprehensive bot statistics"""
+        user_count = await self.get_user_count()
+        report_stats = await self.get_report_stats()
+        account_stats = await self.get_account_stats()
+        
+        # Transaction stats
+        try:
+            total_revenue_pipeline = [
+                {"$match": {"status": "completed"}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]
+            total_revenue_result = await self.db.transactions.aggregate(total_revenue_pipeline).to_list(1)
+            total_revenue = total_revenue_result[0]['total'] if total_revenue_result else 0
+            
+            total_tokens_pipeline = [
+                {"$match": {"status": "completed"}},
+                {"$group": {"_id": None, "total": {"$sum": "$tokens_purchased"}}}
+            ]
+            total_tokens_result = await self.db.transactions.aggregate(total_tokens_pipeline).to_list(1)
+            total_tokens = total_tokens_result[0]['total'] if total_tokens_result else 0
+        except:
+            total_revenue = 0
+            total_tokens = 0
+        
+        return {
+            "users": user_count,
+            "reports": report_stats,
+            "accounts": account_stats,
+            "total_revenue": total_revenue,
+            "total_tokens_sold": total_tokens
+        }
 
-if __name__ == '__main__':
-    main()
+# Global database instance
+db = Database()
