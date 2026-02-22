@@ -76,12 +76,13 @@ class TelegramAccount:
 
 @dataclass
 class ActiveSession:
+    """Fixed ActiveSession class - non-default args come first"""
     session_id: str
     user_id: int
     account_id: str
+    expires_at: datetime  # Non-default field
     login_time: datetime = field(default_factory=datetime.now)
     last_activity: datetime = field(default_factory=datetime.now)
-    expires_at: datetime
 
 @dataclass
 class Transaction:
