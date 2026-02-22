@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Advanced Report Bot - Main Entry Point
-Complete solution with multi-account support, token system, and admin panel
+Complete solution with multi-account support, token system, admin panel, and owner features
 """
 
 import logging
@@ -35,6 +35,7 @@ from auth import AuthHandler, PHONE_NUMBER, OTP_CODE, PASSWORD, TWO_FA_SETUP
 from payments import PaymentHandler
 from report_handler import ReportHandler, SELECT_ACCOUNT, REPORT_TYPE, REPORT_TARGET, REPORT_REASON, REPORT_DETAILS, CONFIRMATION, ADMIN_TARGET, ADMIN_REASON
 from admin_handler import AdminHandler
+from owner_handler import owner_handler  # NEW: Import owner handler
 from account_manager import account_manager
 from models import UserRole
 
@@ -78,10 +79,11 @@ def start_healthcheck_server():
 
 # ========== EMERGENCY TEST COMMAND ==========
 async def emergency_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Emergency test command that works without database"""
+    """Emergency test command that works without database - FIXED VERSION"""
     try:
         user = update.effective_user
-        # Check database properly - don't use bool() on Motor objects
+        
+        # Check database status safely
         db_status = "❌ Not Connected"
         if db is not None:
             if hasattr(db, 'db') and db.db is not None:
@@ -89,25 +91,40 @@ async def emergency_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Try a simple operation to test connection
                     await db.db.command('ping')
                     db_status = "✅ Connected and working"
-                except:
-                    db_status = "⚠️ Connected but not responding"
+                except Exception as e:
+                    db_status = f"⚠️ Connected but error: {str(e)[:50]}"
             else:
                 db_status = "❌ Database object exists but no connection"
+                
+                # Check if we have a URI
+                if config.MONGODB_URI:
+                    db_status += "\n• URI is set but connection failed"
+                    if 'Adiantum' in config.MONGODB_URI:
+                        db_status += "\n• Password appears correct"
+                    else:
+                        db_status += "\n• Check your password in URI"
+                else:
+                    db_status += "\n• MONGODB_URI is not set in Railway variables!"
         else:
             db_status = "❌ Database object is None"
-            
-        await update.message.reply_text(
-            f"✅ **EMERGENCY TEST PASSED**\n\n"
-            f"**Bot is receiving commands!**\n\n"
-            f"Your ID: `{user.id}`\n"
+        
+        # Create plain text message
+        message = (
+            f"✅ EMERGENCY TEST PASSED\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Bot is receiving commands!\n\n"
+            f"Your ID: {user.id}\n"
             f"Your Name: {user.first_name}\n"
             f"Bot Username: @{context.bot.username}\n\n"
-            f"**Status:**\n"
-            f"• Database: {db_status}\n"
-            f"• Config loaded: ✅\n\n"
-            f"Send /test for more details.",
-            parse_mode='Markdown'
+            f"Database Status:\n{db_status}\n\n"
+            f"Config Status:\n"
+            f"• BOT_TOKEN: {'✅ Set' if config.BOT_TOKEN else '❌ Missing'}\n"
+            f"• MONGODB_URI: {'✅ Set' if config.MONGODB_URI else '❌ Missing'}\n\n"
+            f"Send /test for more details."
         )
+        
+        await update.message.reply_text(message)
+        
     except Exception as e:
         await update.message.reply_text(f"Emergency test error: {str(e)}")
 
@@ -115,7 +132,7 @@ async def emergency_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Simple ping command to test if bot is responding"""
     try:
-        await update.message.reply_text("🏓 **Pong! Bot is working!**", parse_mode='Markdown')
+        await update.message.reply_text("🏓 Pong! Bot is working!")
         logger.info(f"Ping command used by user {update.effective_user.id}")
     except Exception as e:
         logger.error(f"Ping command error: {e}")
@@ -123,7 +140,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Test command to check database connection - FIXED VERSION"""
     try:
-        # Check database properly - don't use bool() on Motor objects
+        # Check database properly
         db_status = "❌ Not Connected"
         if db is not None:
             if hasattr(db, 'db') and db.db is not None:
@@ -152,20 +169,21 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uri_preview = config.MONGODB_URI[:30] + "..."
         
         message = (
-            f"🔧 **Bot Diagnostic Test**\n\n"
-            f"**User:** {user.first_name}\n"
-            f"**User ID:** `{user.id}`\n"
-            f"**Database:** {db_status}\n"
-            f"**Bot Token:** {'✅ Set' if config.BOT_TOKEN else '❌ Missing'}\n"
-            f"**MongoDB URI:** {uri_preview}\n\n"
-            f"**Role Checks:**\n"
+            f"🔧 Bot Diagnostic Test\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"User: {user.first_name}\n"
+            f"User ID: {user.id}\n"
+            f"Database: {db_status}\n"
+            f"Bot Token: {'✅ Set' if config.BOT_TOKEN else '❌ Missing'}\n"
+            f"MongoDB URI: {uri_preview}\n\n"
+            f"Role Checks:\n"
             f"• Super Admin: {'✅ Yes' if is_super else '❌ No'}\n"
             f"• Owner: {'✅ Yes' if is_owner else '❌ No'}\n"
             f"• Admin: {'✅ Yes' if is_admin else '❌ No'}\n\n"
             f"Try sending /start to see the main menu."
         )
         
-        await update.message.reply_text(message, parse_mode='Markdown')
+        await update.message.reply_text(message)
         logger.info(f"Test command used by user {user.id}")
         
     except Exception as e:
@@ -176,13 +194,13 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Debug command to check bot status"""
     try:
         await update.message.reply_text(
-            f"🔍 **Debug Info**\n\n"
+            f"🔍 Debug Info\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Bot Username: @{context.bot.username}\n"
-            f"Bot ID: `{context.bot.id}`\n"
-            f"Your ID: `{update.effective_user.id}`\n"
-            f"Chat ID: `{update.effective_chat.id}`\n"
-            f"Message ID: `{update.effective_message.message_id}`",
-            parse_mode='Markdown'
+            f"Bot ID: {context.bot.id}\n"
+            f"Your ID: {update.effective_user.id}\n"
+            f"Chat ID: {update.effective_chat.id}\n"
+            f"Message ID: {update.effective_message.message_id}"
         )
     except Exception as e:
         logger.error(f"Debug command error: {e}")
@@ -299,10 +317,15 @@ class TelegramReportBot:
                 ]
             ]
             
-            # Add admin button for privileged users
+            # Add admin button for admins
             if user_role in ["ADMIN", "OWNER", "SUPER ADMIN"]:
                 keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="menu_admin")])
                 logger.info(f"✅ Admin panel button added for user {user_id}")
+            
+            # Add owner button for owners (NEW)
+            if user_role in ["OWNER", "SUPER ADMIN"]:
+                keyboard.append([InlineKeyboardButton("👑 Owner Panel", callback_data="menu_owner")])
+                logger.info(f"✅ Owner panel button added for user {user_id}")
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -396,6 +419,13 @@ class TelegramReportBot:
             "/reports - View all reports\n"
             "/verify - Verify payments\n\n"
             
+            "**Owner Commands:**\n"
+            "• Access via Owner Panel button\n"
+            "• Broadcast messages\n"
+            "• Create giveaways\n"
+            "• Add tokens to users\n"
+            "• System statistics\n\n"
+            
             "**How to Report:**\n"
             "1. Add an account using /login\n"
             "2. Buy tokens with /buy\n"
@@ -467,9 +497,20 @@ class TelegramReportBot:
             parse_mode='Markdown'
         )
     
-    # ========== IMPROVED BUTTON HANDLER ==========
+    async def handle_owner_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle owner feature messages"""
+        if context.user_data.get('broadcast_mode'):
+            await owner_handler.handle_broadcast_message(update, context)
+        elif context.user_data.get('giveaway_step') == 'amount':
+            await owner_handler.handle_giveaway_amount(update, context)
+        elif context.user_data.get('giveaway_step') == 'winners':
+            await owner_handler.handle_giveaway_winners(update, context)
+        elif context.user_data.get('add_tokens'):
+            await owner_handler.handle_add_tokens(update, context)
+    
+    # ========== FIXED BUTTON HANDLER ==========
     async def menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle menu button callbacks - IMPROVED VERSION with better error handling"""
+        """Handle menu button callbacks - FIXED VERSION with owner panel"""
         query = update.callback_query
         
         try:
@@ -486,8 +527,43 @@ class TelegramReportBot:
             
             # ===== HANDLE EACH BUTTON TYPE =====
             
+            # Owner Panel Button (NEW)
+            if data == "menu_owner":
+                # Check if user has owner privileges
+                is_owner = (user_id == config.SUPER_ADMIN_ID or user_id in config.OWNER_IDS)
+                
+                if not is_owner:
+                    await query.edit_message_text("❌ Owner access only.")
+                    return
+                
+                await query.message.delete()
+                await owner_handler.owner_panel(update, context)
+                return
+            
+            # Owner Panel Callbacks
+            elif data == "owner_panel":
+                await query.message.delete()
+                await owner_handler.owner_panel(update, context)
+                return
+                
+            elif data == "owner_broadcast":
+                await owner_handler.broadcast_message(update, context)
+                return
+                
+            elif data == "owner_giveaway":
+                await owner_handler.giveaway_setup(update, context)
+                return
+                
+            elif data == "owner_add_tokens":
+                await owner_handler.add_tokens_to_user(update, context)
+                return
+                
+            elif data == "owner_stats":
+                await owner_handler.owner_stats(update, context)
+                return
+            
             # Admin Panel Button
-            if data == "menu_admin":
+            elif data == "menu_admin":
                 # Check if user has admin privileges
                 is_admin = (user_id == config.SUPER_ADMIN_ID or 
                            user_id in config.OWNER_IDS or 
@@ -505,10 +581,7 @@ class TelegramReportBot:
             elif data == "menu_report":
                 await query.message.delete()
                 context.user_data['from_menu'] = True
-                result = await self.report_handler.start_report(update, context)
-                if result is None:
-                    # If start_report doesn't return a state, send a message
-                    await query.message.reply_text("📝 Starting report process... Use /report to begin.")
+                await self.report_handler.start_report(update, context)
                 return
             
             # Buy Tokens Button
@@ -551,8 +624,7 @@ class TelegramReportBot:
             else:
                 logger.warning(f"Unknown callback data: {data}")
                 await query.edit_message_text(
-                    f"❓ Unknown button: `{data}`\n\nPlease use /start to restart.",
-                    parse_mode='Markdown'
+                    f"❓ Unknown button. Please use /start to restart."
                 )
                 
         except Exception as e:
@@ -560,22 +632,11 @@ class TelegramReportBot:
             
             # Try to send error message to user
             try:
-                error_message = (
-                    "❌ **An error occurred while processing your request.**\n\n"
-                    f"Error: `{str(e)[:100]}`\n\n"
-                    "Please try again or use /start"
+                await query.message.reply_text(
+                    "❌ An error occurred. Please use /start to restart."
                 )
-                
-                # Try to edit the original message
-                await query.edit_message_text(error_message, parse_mode='Markdown')
             except:
-                try:
-                    # If edit fails, try to send a new message
-                    await query.message.reply_text(
-                        "❌ An error occurred. Please use /start to restart."
-                    )
-                except:
-                    pass
+                pass
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors gracefully"""
@@ -735,9 +796,18 @@ class TelegramReportBot:
         )
         self.application.add_handler(report_conv)
         
+        # ========== OWNER MESSAGE HANDLERS ==========
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            self.handle_owner_messages
+        ))
+        
         # ========== CALLBACK QUERY HANDLERS ==========
         # Main menu buttons
         self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^menu_'))
+        
+        # Owner panel buttons
+        self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^owner_'))
         
         # Account management buttons
         self.application.add_handler(CallbackQueryHandler(account_manager.handle_account_callback, pattern='^(add_account|refresh_accounts|manage_acc_|activate_acc_|deactivate_acc_|set_primary_|rename_acc_|delete_acc_|acc_reports_|confirm_delete_|back_accounts)$'))
