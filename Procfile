@@ -1,1 +1,1 @@
-ggg
+web: python main.py
