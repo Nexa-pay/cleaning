@@ -91,6 +91,21 @@ class TelegramReportBot:
             user = update.effective_user
             user_id = user.id
             
+            # Log the user ID for debugging
+            logger.info(f"User {user_id} started the bot")
+            
+            # Determine user role based on config
+            user_role = "NORMAL USER"
+            if user_id == config.SUPER_ADMIN_ID:
+                user_role = "SUPER ADMIN"
+                logger.info(f"✅ User {user_id} identified as SUPER ADMIN")
+            elif user_id in config.OWNER_IDS:
+                user_role = "OWNER"
+                logger.info(f"✅ User {user_id} identified as OWNER")
+            elif user_id in config.ADMIN_IDS:
+                user_role = "ADMIN"
+                logger.info(f"✅ User {user_id} identified as ADMIN")
+            
             # Get or create user in database with error handling
             try:
                 db_user = await db.get_user(user_id)
@@ -101,13 +116,11 @@ class TelegramReportBot:
                         first_name=user.first_name,
                         last_name=user.last_name
                     )
-                role_text = db_user.role.value.upper()
                 tokens = db_user.tokens
                 total_reports = db_user.total_reports
             except Exception as e:
                 logger.error(f"Database error in start: {e}")
                 # Fallback values if database fails
-                role_text = "NORMAL"
                 tokens = 0
                 total_reports = 0
             
@@ -117,7 +130,7 @@ class TelegramReportBot:
                 f"🆔 **User ID:** `{user_id}`\n"
                 f"💰 **Tokens:** {tokens}\n"
                 f"📊 **Reports Made:** {total_reports}\n"
-                f"👑 **Role:** {role_text}\n\n"
+                f"👑 **Role:** {user_role}\n\n"
                 "I'm a comprehensive reporting bot that helps you report:\n"
                 "• 👤 Suspicious users\n"
                 "• 👥 Problematic groups\n"
@@ -141,10 +154,10 @@ class TelegramReportBot:
                 ]
             ]
             
-            # Add admin button for admins (only if we have db_user)
-            if 'db_user' in locals() and db_user and hasattr(db_user, 'role'):
-                if db_user.role in [UserRole.ADMIN, UserRole.OWNER, UserRole.SUPER_ADMIN]:
-                    keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="menu_admin")])
+            # Add admin button for admins/owners/super admin
+            if user_role in ["ADMIN", "OWNER", "SUPER ADMIN"]:
+                keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="menu_admin")])
+                logger.info(f"✅ Admin panel button added for user {user_id}")
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -153,12 +166,52 @@ class TelegramReportBot:
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
+            
         except Exception as e:
-            logger.error(f"Error in start command: {e}")
+            logger.error(f"Error in start command: {e}", exc_info=True)
             await update.message.reply_text(
                 "👋 Welcome! The bot is starting up. Please try again in a few seconds.\n\n"
                 f"If this persists, contact @{config.CONTACT_INFO['admin_username']}"
             )
+    
+    async def whoami_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Check your role and permissions"""
+        try:
+            user_id = update.effective_user.id
+            
+            # Check roles directly from config
+            is_super = (user_id == config.SUPER_ADMIN_ID)
+            is_owner = (user_id in config.OWNER_IDS)
+            is_admin = (user_id in config.ADMIN_IDS)
+            
+            # Determine primary role
+            if is_super:
+                role = "SUPER ADMIN"
+            elif is_owner:
+                role = "OWNER"
+            elif is_admin:
+                role = "ADMIN"
+            else:
+                role = "NORMAL USER"
+            
+            message = (
+                f"👤 **Your Information**\n\n"
+                f"**User ID:** `{user_id}`\n"
+                f"**Your Role:** `{role}`\n\n"
+                f"**Permission Checks:**\n"
+                f"• Is Super Admin: {'✅ Yes' if is_super else '❌ No'}\n"
+                f"• Is Owner: {'✅ Yes' if is_owner else '❌ No'}\n"
+                f"• Is Admin: {'✅ Yes' if is_admin else '❌ No'}\n\n"
+                f"**Config Values:**\n"
+                f"ADMIN_IDS: `{config.ADMIN_IDS}`\n"
+                f"OWNER_IDS: `{config.OWNER_IDS}`\n"
+                f"SUPER_ADMIN_ID: `{config.SUPER_ADMIN_ID}`"
+            )
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Error in whoami command: {e}")
+            await update.message.reply_text("❌ Error checking your information.")
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show help information"""
@@ -167,6 +220,7 @@ class TelegramReportBot:
             "**User Commands:**\n"
             "/start - Start the bot\n"
             "/help - Show this help\n"
+            "/whoami - Check your role\n"
             "/login - Add Telegram account\n"
             "/accounts - Manage accounts\n"
             "/report - Start reporting\n"
@@ -252,7 +306,26 @@ class TelegramReportBot:
             await query.answer()
             
             data = query.data
+            user_id = update.effective_user.id
             
+            logger.info(f"Menu callback: {data} from user {user_id}")
+            
+            # Check admin access for admin panel
+            if data == "menu_admin":
+                # Check if user has admin privileges directly from config
+                is_admin = (user_id == config.SUPER_ADMIN_ID or 
+                           user_id in config.OWNER_IDS or 
+                           user_id in config.ADMIN_IDS)
+                
+                if not is_admin:
+                    await query.message.reply_text("❌ You don't have admin access.")
+                    return
+                
+                await query.message.delete()
+                await self.admin_handler.admin_panel(update, context)
+                return
+            
+            # Handle other menu options
             if data == "menu_report":
                 await query.message.delete()
                 context.user_data['from_menu'] = True
@@ -278,15 +351,18 @@ class TelegramReportBot:
                 await query.message.delete()
                 await self.contact_command(update, context)
                 
-            elif data == "menu_admin":
-                await query.message.delete()
-                await self.admin_handler.admin_panel(update, context)
-                
             elif data == "back_to_main":
                 await query.message.delete()
                 await self.start(update, context)
+                
         except Exception as e:
-            logger.error(f"Error in menu callback: {e}")
+            logger.error(f"Error in menu callback: {e}", exc_info=True)
+            try:
+                await query.message.reply_text(
+                    "❌ An error occurred. Please try again or use /start"
+                )
+            except:
+                pass
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors gracefully"""
@@ -304,6 +380,11 @@ class TelegramReportBot:
     async def post_init(self, application: Application):
         """Run after bot initialization"""
         logger.info("Bot is starting up...")
+        
+        # Log configuration for debugging
+        logger.info(f"ADMIN_IDS: {config.ADMIN_IDS}")
+        logger.info(f"OWNER_IDS: {config.OWNER_IDS}")
+        logger.info(f"SUPER_ADMIN_ID: {config.SUPER_ADMIN_ID}")
         
         # Start healthcheck server in a background thread
         health_thread = threading.Thread(target=start_healthcheck_server, daemon=True)
@@ -347,6 +428,7 @@ class TelegramReportBot:
         # Basic command handlers
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("whoami", self.whoami_command))
         self.application.add_handler(CommandHandler("balance", self.balance_command))
         self.application.add_handler(CommandHandler("contact", self.contact_command))
         self.application.add_handler(CommandHandler("buy", self.payment_handler.show_token_packages))
