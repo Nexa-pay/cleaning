@@ -196,7 +196,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Debug command error: {e}")
 
-# ========== TOKEN GIVING COMMAND ==========
+# ========== TOKEN COMMANDS ==========
 async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Give tokens to a user (owner only)"""
     user_id = update.effective_user.id
@@ -206,7 +206,6 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Owner only command.")
         return
     
-    # Check if arguments provided
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
             "Usage: `/givetokens <user_id> <amount>`\n"
@@ -223,12 +222,10 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Amount must be positive.")
             return
         
-        # Check if database is connected
-        if not db.is_db_connected():
-            await update.message.reply_text("❌ Database not connected. Cannot add tokens.")
+        if not self.is_db_connected():
+            await update.message.reply_text("❌ Database not connected.")
             return
         
-        # Update tokens
         success = await db.update_user_tokens(target_id, amount)
         
         if success:
@@ -236,16 +233,14 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ Added **{amount}** tokens to user `{target_id}`",
                 parse_mode='Markdown'
             )
-            
-            # Try to notify the user
             try:
                 await context.bot.send_message(
                     chat_id=target_id,
                     text=f"💰 You received **{amount}** tokens from owner!",
                     parse_mode='Markdown'
                 )
-            except Exception as e:
-                logger.warning(f"Could not notify user {target_id}: {e}")
+            except:
+                pass
         else:
             await update.message.reply_text(
                 f"❌ Failed to add tokens. User `{target_id}` may not exist.",
@@ -253,10 +248,29 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             
     except ValueError:
-        await update.message.reply_text("❌ Invalid user ID or amount. Use numbers only.")
+        await update.message.reply_text("❌ Invalid user ID or amount.")
     except Exception as e:
-        logger.error(f"Error in give_tokens: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        logger.error(f"Error: {e}")
+
+async def freetokens_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get free tokens for testing"""
+    user_id = update.effective_user.id
+    
+    if not self.is_db_connected():
+        await update.message.reply_text("❌ Database not connected.")
+        return
+    
+    success = await db.update_user_tokens(user_id, 10)
+    
+    if success:
+        await update.message.reply_text(
+            f"✅ You received **10 free tokens** for testing!\n\n"
+            f"Use /balance to check your balance.\n"
+            f"Use /report to start reporting.",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text("❌ Could not add tokens.")
 
 # ========== MAIN BOT CLASS ==========
 class TelegramReportBot:
@@ -368,10 +382,6 @@ class TelegramReportBot:
             
         except Exception as e:
             logger.error(f"Error in start: {e}")
-            try:
-                await update.message.reply_text("👋 Welcome! Please try again.")
-            except:
-                pass
     
     async def whoami_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Check your role and permissions"""
@@ -432,7 +442,8 @@ class TelegramReportBot:
             "/myreports - View reports\n"
             "/buy - Purchase tokens\n"
             "/balance - Check balance\n"
-            "/contact - Contact support\n\n"
+            "/contact - Contact support\n"
+            "/freetokens - Get free test tokens\n\n"
             
             "**Admin Commands:**\n"
             "/admin - Admin panel\n"
@@ -486,25 +497,6 @@ class TelegramReportBot:
         )
         
         await update.message.reply_text(contact_text, parse_mode='Markdown')
-    
-    async def debug_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Debug callback to see button data"""
-        query = update.callback_query
-        await query.answer()
-        
-        data = query.data
-        user_id = update.effective_user.id
-        
-        logger.info(f"🔍 DEBUG BUTTON: {data} from user {user_id}")
-        
-        await query.message.reply_text(
-            f"🔍 **Debug Info**\n\n"
-            f"Button pressed: `{data}`\n"
-            f"User ID: `{user_id}`\n"
-            f"Chat ID: `{update.effective_chat.id}`\n\n"
-            f"This is a debug message.",
-            parse_mode='Markdown'
-        )
     
     async def handle_owner_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle owner feature messages"""
@@ -706,13 +698,14 @@ class TelegramReportBot:
         self.application.add_handler(CommandHandler("accounts", account_manager.show_accounts))
         self.application.add_handler(CommandHandler("myreports", self.report_handler.my_reports))
         self.application.add_handler(CommandHandler("givetokens", give_tokens_command))
+        self.application.add_handler(CommandHandler("freetokens", freetokens_command))
         
         # Admin commands
         self.application.add_handler(CommandHandler("admin", self.admin_handler.admin_panel))
         self.application.add_handler(CommandHandler("stats", self.admin_handler.show_statistics))
         self.application.add_handler(CommandHandler("verify", self.payment_handler.admin_verify_payment))
         
-        # Login conversation - UPDATED with simplified states
+        # Login conversation
         login_conv = ConversationHandler(
             entry_points=[CommandHandler('login', self.auth_handler.start_login)],
             states={
@@ -755,16 +748,13 @@ class TelegramReportBot:
             self.handle_owner_messages
         ))
         
-        # DEBUG: Temporary callback handler (remove after testing)
-        self.application.add_handler(CallbackQueryHandler(self.debug_callback))
-        
-        # Callback query handlers
-        self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^menu_'))
-        self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^owner_'))
+        # Callback query handlers - ORDER MATTERS!
         self.application.add_handler(CallbackQueryHandler(account_manager.handle_account_callback, pattern='^(add_account|refresh_accounts|manage_acc_|activate_acc_|deactivate_acc_|set_primary_|rename_acc_|delete_acc_|acc_reports_|confirm_delete_|back_accounts)$'))
         self.application.add_handler(CallbackQueryHandler(self.payment_handler.handle_package_selection, pattern='^(buy_stars_|buy_upi_|check_balance)$'))
         self.application.add_handler(CallbackQueryHandler(self.payment_handler.confirm_payment, pattern='^(confirm_stars_|confirm_upi_|cancel_payment)$'))
         self.application.add_handler(CallbackQueryHandler(self.admin_handler.handle_admin_callback, pattern='^admin_'))
+        self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^menu_'))
+        self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^owner_'))
         
         # Error handler
         self.application.add_error_handler(self.error_handler)
