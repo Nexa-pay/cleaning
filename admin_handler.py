@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class AdminHandler:
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show admin panel"""
+        """Show admin panel - FIXED VERSION"""
         try:
             user_id = update.effective_user.id
             
@@ -22,10 +22,13 @@ class AdminHandler:
                        user_id in config.ADMIN_IDS)
             
             if not is_admin:
-                await update.effective_message.reply_text("❌ **Unauthorized Access**\n\nThis area is for admins only.", parse_mode='Markdown')
+                if update.callback_query:
+                    await update.callback_query.edit_message_text("❌ **Unauthorized Access**\n\nThis area is for admins only.", parse_mode='Markdown')
+                else:
+                    await update.message.reply_text("❌ **Unauthorized Access**\n\nThis area is for admins only.", parse_mode='Markdown')
                 return
             
-            # Get user role for display (don't use database)
+            # Get user role for display
             role = "ADMIN"
             if user_id in config.OWNER_IDS:
                 role = "OWNER"
@@ -33,17 +36,15 @@ class AdminHandler:
                 role = "SUPER ADMIN"
             
             # Get quick stats from database with error handling
+            pending_count = 0
+            user_count = 0
+            
             try:
-                if db and db.db:
+                if db and db.db is not None:
                     pending_count = await db.db.reports.count_documents({"status": "pending"})
                     user_count = await db.get_user_count()
-                else:
-                    pending_count = 0
-                    user_count = 0
             except Exception as e:
                 logger.error(f"Error getting stats: {e}")
-                pending_count = 0
-                user_count = 0
             
             message = (
                 f"👑 **Admin Control Panel**\n\n"
@@ -67,24 +68,35 @@ class AdminHandler:
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Check if this is a callback query or direct message
+            # Handle both callback queries and direct messages
             if update.callback_query:
-                await update.callback_query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+                try:
+                    await update.callback_query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+                except Exception as e:
+                    logger.error(f"Error editing message: {e}")
+                    # If edit fails, send new message
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=message,
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
             else:
                 await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
                 
         except Exception as e:
             logger.error(f"Error in admin_panel: {e}", exc_info=True)
             try:
-                await update.effective_message.reply_text(
-                    "❌ An error occurred opening admin panel.\n"
-                    "Please try again or use /start"
-                )
+                error_msg = "❌ An error occurred opening admin panel.\nPlease try again or use /start"
+                if update.callback_query:
+                    await update.callback_query.edit_message_text(error_msg)
+                else:
+                    await update.message.reply_text(error_msg)
             except:
                 pass
     
     async def handle_admin_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle admin panel callbacks"""
+        """Handle admin panel callbacks - FIXED VERSION"""
         try:
             query = update.callback_query
             await query.answer()
@@ -102,6 +114,9 @@ class AdminHandler:
             if not is_admin:
                 await query.edit_message_text("❌ Unauthorized access.")
                 return
+            
+            # Show loading message
+            await query.edit_message_text("⏳ Loading...")
             
             if data == "admin_pending":
                 await self.show_pending_reports(update, context)
@@ -130,10 +145,16 @@ class AdminHandler:
             elif data.startswith("add_tokens_"):
                 await self.add_tokens_menu(update, context)
             else:
-                await query.edit_message_text(f"Unknown action: {data}")
+                await query.edit_message_text(f"❓ Unknown action: {data}")
                 
         except Exception as e:
             logger.error(f"Error in admin callback: {e}", exc_info=True)
+            try:
+                await update.callback_query.edit_message_text(
+                    "❌ An error occurred. Please try again."
+                )
+            except:
+                pass
     
     async def show_pending_reports(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show pending reports for review"""
@@ -143,7 +164,7 @@ class AdminHandler:
             # Get pending reports from database
             reports = []
             try:
-                if db and db.db:
+                if db and db.db is not None:
                     cursor = db.db.reports.find({"status": "pending"}).sort("created_at", -1).limit(10)
                     reports = await cursor.to_list(length=10)
             except Exception as e:
@@ -190,6 +211,7 @@ class AdminHandler:
             
         except Exception as e:
             logger.error(f"Error in show_pending_reports: {e}")
+            await query.edit_message_text("❌ Error loading reports. Please try again.")
     
     async def review_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Review a specific report"""
@@ -200,7 +222,7 @@ class AdminHandler:
             # Get report from database
             report = None
             try:
-                if db and db.db:
+                if db and db.db is not None:
                     report = await db.db.reports.find_one({"report_id": report_id})
             except Exception as e:
                 logger.error(f"Error fetching report: {e}")
@@ -209,10 +231,21 @@ class AdminHandler:
                 await query.edit_message_text("❌ Report not found.")
                 return
             
+            # Get user info
+            user_id = report.get('user_id', 'Unknown')
+            username = "Unknown"
+            try:
+                if db and db.db is not None:
+                    user = await db.db.users.find_one({"user_id": user_id})
+                    if user:
+                        username = user.get('username', 'Unknown') or 'Unknown'
+            except:
+                pass
+            
             message = (
                 f"📋 **Report Review**\n\n"
                 f"**Report ID:** `{report_id}`\n"
-                f"**User ID:** `{report.get('user_id', 'Unknown')}`\n"
+                f"**User:** {username} (ID: `{user_id}`)\n"
                 f"**Type:** {report.get('report_type', 'Unknown').upper()}\n"
                 f"**Target:** `{report.get('target', 'Unknown')}`\n"
                 f"**Reason:** {report.get('reason', 'No reason')}\n"
@@ -227,8 +260,8 @@ class AdminHandler:
                     InlineKeyboardButton("❌ Reject", callback_data=f"reject_{report_id}")
                 ],
                 [
-                    InlineKeyboardButton("👤 User Info", callback_data=f"user_info_{report.get('user_id')}"),
-                    InlineKeyboardButton("🔙 Back to List", callback_data="admin_pending")
+                    InlineKeyboardButton("👤 User Info", callback_data=f"user_info_{user_id}"),
+                    InlineKeyboardButton("🔙 Back", callback_data="admin_pending")
                 ]
             ]
             
@@ -237,6 +270,7 @@ class AdminHandler:
             
         except Exception as e:
             logger.error(f"Error in review_report: {e}")
+            await query.edit_message_text("❌ Error loading report. Please try again.")
     
     async def resolve_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Resolve a report"""
@@ -246,26 +280,39 @@ class AdminHandler:
             admin_id = update.effective_user.id
             
             # Update report status
+            success = False
             try:
-                if db and db.db:
-                    await db.db.reports.update_one(
+                if db and db.db is not None:
+                    result = await db.db.reports.update_one(
                         {"report_id": report_id},
                         {"$set": {"status": "resolved", "reviewed_by": admin_id, "reviewed_at": datetime.now()}}
                     )
+                    success = result.modified_count > 0
             except Exception as e:
                 logger.error(f"Error updating report: {e}")
             
-            await query.edit_message_text(
-                f"✅ **Report Resolved**\n\n"
-                f"Report ID: `{report_id}`\n"
-                f"Status updated to RESOLVED.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Back to Pending", callback_data="admin_pending")
-                ]]),
-                parse_mode='Markdown'
-            )
+            if success:
+                await query.edit_message_text(
+                    f"✅ **Report Resolved**\n\n"
+                    f"Report ID: `{report_id}`\n"
+                    f"Status updated to RESOLVED.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back to Pending", callback_data="admin_pending")
+                    ]]),
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Failed to resolve report.\n"
+                    f"Report ID: `{report_id}`",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="admin_pending")
+                    ]]),
+                    parse_mode='Markdown'
+                )
         except Exception as e:
             logger.error(f"Error in resolve_report: {e}")
+            await query.edit_message_text("❌ Error resolving report.")
     
     async def reject_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Reject a report"""
@@ -275,26 +322,39 @@ class AdminHandler:
             admin_id = update.effective_user.id
             
             # Update report status
+            success = False
             try:
-                if db and db.db:
-                    await db.db.reports.update_one(
+                if db and db.db is not None:
+                    result = await db.db.reports.update_one(
                         {"report_id": report_id},
                         {"$set": {"status": "rejected", "reviewed_by": admin_id, "reviewed_at": datetime.now()}}
                     )
+                    success = result.modified_count > 0
             except Exception as e:
                 logger.error(f"Error updating report: {e}")
             
-            await query.edit_message_text(
-                f"❌ **Report Rejected**\n\n"
-                f"Report ID: `{report_id}`\n"
-                f"Status updated to REJECTED.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Back to Pending", callback_data="admin_pending")
-                ]]),
-                parse_mode='Markdown'
-            )
+            if success:
+                await query.edit_message_text(
+                    f"❌ **Report Rejected**\n\n"
+                    f"Report ID: `{report_id}`\n"
+                    f"Status updated to REJECTED.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back to Pending", callback_data="admin_pending")
+                    ]]),
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Failed to reject report.\n"
+                    f"Report ID: `{report_id}`",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="admin_pending")
+                    ]]),
+                    parse_mode='Markdown'
+                )
         except Exception as e:
             logger.error(f"Error in reject_report: {e}")
+            await query.edit_message_text("❌ Error rejecting report.")
     
     async def user_management(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """User management interface"""
@@ -307,7 +367,7 @@ class AdminHandler:
             blocked_users = 0
             
             try:
-                if db and db.db:
+                if db and db.db is not None:
                     total_users = await db.db.users.count_documents({})
                     active_today = await db.db.users.count_documents({
                         "last_active": {"$gte": datetime.now() - timedelta(days=1)}
@@ -336,6 +396,7 @@ class AdminHandler:
             await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in user_management: {e}")
+            await query.edit_message_text("❌ Error loading user management.")
     
     async def token_management(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Token management interface"""
@@ -346,7 +407,7 @@ class AdminHandler:
             total_tokens = 0
             
             try:
-                if db and db.db:
+                if db and db.db is not None:
                     pipeline = [
                         {"$match": {"status": "completed"}},
                         {"$group": {"_id": None, "total": {"$sum": "$tokens_purchased"}}}
@@ -376,6 +437,7 @@ class AdminHandler:
             await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in token_management: {e}")
+            await query.edit_message_text("❌ Error loading token management.")
     
     async def show_statistics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show bot statistics"""
@@ -386,22 +448,28 @@ class AdminHandler:
             total_users = 0
             total_reports = 0
             pending_reports = 0
+            resolved_reports = 0
+            total_accounts = 0
             
             try:
-                if db and db.db:
+                if db and db.db is not None:
                     total_users = await db.db.users.count_documents({})
                     total_reports = await db.db.reports.count_documents({})
                     pending_reports = await db.db.reports.count_documents({"status": "pending"})
+                    resolved_reports = await db.db.reports.count_documents({"status": "resolved"})
+                    total_accounts = await db.db.accounts.count_documents({})
             except Exception as e:
                 logger.error(f"Error getting stats: {e}")
             
             message = (
                 f"📊 **Bot Statistics**\n\n"
                 f"**👥 Users**\n"
-                f"• Total: {total_users}\n\n"
+                f"• Total Users: {total_users}\n"
+                f"• Total Accounts: {total_accounts}\n\n"
                 f"**📊 Reports**\n"
-                f"• Total: {total_reports}\n"
-                f"• Pending: {pending_reports}\n\n"
+                f"• Total Reports: {total_reports}\n"
+                f"• Pending: {pending_reports}\n"
+                f"• Resolved: {resolved_reports}\n\n"
                 f"**💰 Financial**\n"
                 f"• Coming soon..."
             )
@@ -415,6 +483,7 @@ class AdminHandler:
             await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in show_statistics: {e}")
+            await query.edit_message_text("❌ Error loading statistics.")
     
     async def bot_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Bot settings interface"""
@@ -448,6 +517,7 @@ class AdminHandler:
             await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in bot_settings: {e}")
+            await query.edit_message_text("❌ Error loading settings.")
     
     async def show_user_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show user information"""
@@ -458,7 +528,7 @@ class AdminHandler:
             # Get user from database
             user_data = None
             try:
-                if db and db.db:
+                if db and db.db is not None:
                     user_data = await db.db.users.find_one({"user_id": user_id})
             except Exception as e:
                 logger.error(f"Error fetching user: {e}")
@@ -466,6 +536,16 @@ class AdminHandler:
             if not user_data:
                 await query.edit_message_text("❌ User not found.")
                 return
+            
+            # Get user stats
+            account_count = 0
+            report_count = 0
+            try:
+                if db and db.db is not None:
+                    account_count = await db.db.accounts.count_documents({"user_id": user_id})
+                    report_count = await db.db.reports.count_documents({"user_id": user_id})
+            except:
+                pass
             
             message = (
                 f"👤 **User Information**\n\n"
@@ -478,17 +558,25 @@ class AdminHandler:
                 
                 f"**Statistics:**\n"
                 f"• Tokens: {user_data.get('tokens', 0)}\n"
-                f"• Reports: {user_data.get('total_reports', 0)}\n"
+                f"• Reports: {report_count}\n"
+                f"• Accounts: {account_count}\n"
             )
             
-            keyboard = [
-                [InlineKeyboardButton("🔙 Back", callback_data="admin_users")]
-            ]
+            # Add action buttons
+            keyboard = []
+            if user_data.get('is_blocked'):
+                keyboard.append([InlineKeyboardButton("🔓 Unblock User", callback_data=f"unblock_user_{user_id}")])
+            else:
+                keyboard.append([InlineKeyboardButton("🔒 Block User", callback_data=f"block_user_{user_id}")])
+            
+            keyboard.append([InlineKeyboardButton("💰 Add Tokens", callback_data=f"add_tokens_{user_id}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_users")])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Error in show_user_info: {e}")
+            await query.edit_message_text("❌ Error loading user info.")
     
     async def block_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Block a user"""
@@ -496,21 +584,30 @@ class AdminHandler:
             query = update.callback_query
             user_id = int(query.data.replace("block_user_", ""))
             
+            success = False
             try:
-                if db and db.db:
-                    await db.db.users.update_one(
+                if db and db.db is not None:
+                    result = await db.db.users.update_one(
                         {"user_id": user_id},
                         {"$set": {"is_blocked": True}}
                     )
+                    success = result.modified_count > 0
             except Exception as e:
                 logger.error(f"Error blocking user: {e}")
             
-            await query.edit_message_text(
-                f"✅ User `{user_id}` has been blocked.",
-                parse_mode='Markdown'
-            )
+            if success:
+                await query.edit_message_text(
+                    f"✅ User `{user_id}` has been blocked.",
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Failed to block user `{user_id}`.",
+                    parse_mode='Markdown'
+                )
         except Exception as e:
             logger.error(f"Error in block_user: {e}")
+            await query.edit_message_text("❌ Error blocking user.")
     
     async def unblock_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Unblock a user"""
@@ -518,21 +615,30 @@ class AdminHandler:
             query = update.callback_query
             user_id = int(query.data.replace("unblock_user_", ""))
             
+            success = False
             try:
-                if db and db.db:
-                    await db.db.users.update_one(
+                if db and db.db is not None:
+                    result = await db.db.users.update_one(
                         {"user_id": user_id},
                         {"$set": {"is_blocked": False}}
                     )
+                    success = result.modified_count > 0
             except Exception as e:
                 logger.error(f"Error unblocking user: {e}")
             
-            await query.edit_message_text(
-                f"✅ User `{user_id}` has been unblocked.",
-                parse_mode='Markdown'
-            )
+            if success:
+                await query.edit_message_text(
+                    f"✅ User `{user_id}` has been unblocked.",
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Failed to unblock user `{user_id}`.",
+                    parse_mode='Markdown'
+                )
         except Exception as e:
             logger.error(f"Error in unblock_user: {e}")
+            await query.edit_message_text("❌ Error unblocking user.")
     
     async def add_tokens_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show menu to add tokens to user"""
@@ -549,3 +655,4 @@ class AdminHandler:
             )
         except Exception as e:
             logger.error(f"Error in add_tokens_menu: {e}")
+            await query.edit_message_text("❌ Error loading token menu.")
