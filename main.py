@@ -9,6 +9,7 @@ import asyncio
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 from aiohttp import web
 
@@ -22,7 +23,7 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
-from telegram.error import InvalidToken
+from telegram.error import InvalidToken, Conflict
 
 # Import configuration
 import config
@@ -59,13 +60,20 @@ async def run_web_server():
     site = web.TCPSite(runner, '0.0.0.0', 8080)
     await site.start()
     logger.info("✅ Healthcheck server running on port 8080")
+    
+    # Keep the server running
+    await asyncio.Event().wait()
 
 def start_healthcheck_server():
     """Start healthcheck server in a separate thread"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_web_server())
-    loop.run_forever()
+    try:
+        loop.run_until_complete(run_web_server())
+    except Exception as e:
+        logger.error(f"Healthcheck server error: {e}")
+    finally:
+        loop.close()
 
 class TelegramReportBot:
     def __init__(self):
@@ -74,6 +82,8 @@ class TelegramReportBot:
         self.payment_handler = PaymentHandler()
         self.report_handler = ReportHandler()
         self.admin_handler = AdminHandler()
+        self._db_connected = False
+        self._start_time = time.time()
         
     def check_config(self):
         """Check if required configuration is present"""
@@ -83,7 +93,26 @@ class TelegramReportBot:
             logger.error("Please set the BOT_TOKEN environment variable")
             logger.error("=" * 50)
             return False
+        
+        if not config.MONGODB_URI:
+            logger.error("=" * 50)
+            logger.error("MONGODB_URI is not configured!")
+            logger.error("Please set the MONGODB_URI environment variable")
+            logger.error("=" * 50)
+            return False
+            
         return True
+    
+    async def get_user_role(self, user_id: int) -> str:
+        """Determine user role based on config"""
+        if user_id == config.SUPER_ADMIN_ID:
+            return "SUPER ADMIN"
+        elif user_id in config.OWNER_IDS:
+            return "OWNER"
+        elif user_id in config.ADMIN_IDS:
+            return "ADMIN"
+        else:
+            return "NORMAL USER"
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message with inline buttons"""
@@ -94,20 +123,18 @@ class TelegramReportBot:
             # Log the user ID for debugging
             logger.info(f"User {user_id} started the bot")
             
-            # Determine user role based on config
-            user_role = "NORMAL USER"
-            if user_id == config.SUPER_ADMIN_ID:
-                user_role = "SUPER ADMIN"
-                logger.info(f"✅ User {user_id} identified as SUPER ADMIN")
-            elif user_id in config.OWNER_IDS:
-                user_role = "OWNER"
-                logger.info(f"✅ User {user_id} identified as OWNER")
-            elif user_id in config.ADMIN_IDS:
-                user_role = "ADMIN"
-                logger.info(f"✅ User {user_id} identified as ADMIN")
+            # Determine user role
+            user_role = await self.get_user_role(user_id)
             
             # Get or create user in database with error handling
+            tokens = 0
+            total_reports = 0
+            
             try:
+                # Ensure database connection
+                if not self._db_connected:
+                    await db.ensure_connection()
+                    
                 db_user = await db.get_user(user_id)
                 if not db_user:
                     db_user = await db.create_user(
@@ -116,13 +143,14 @@ class TelegramReportBot:
                         first_name=user.first_name,
                         last_name=user.last_name
                     )
-                tokens = db_user.tokens
-                total_reports = db_user.total_reports
+                
+                if db_user:
+                    tokens = getattr(db_user, 'tokens', 0)
+                    total_reports = getattr(db_user, 'total_reports', 0)
+                    
             except Exception as e:
                 logger.error(f"Database error in start: {e}")
                 # Fallback values if database fails
-                tokens = 0
-                total_reports = 0
             
             # Create welcome message
             welcome_text = (
@@ -169,10 +197,13 @@ class TelegramReportBot:
             
         except Exception as e:
             logger.error(f"Error in start command: {e}", exc_info=True)
-            await update.message.reply_text(
-                "👋 Welcome! The bot is starting up. Please try again in a few seconds.\n\n"
-                f"If this persists, contact @{config.CONTACT_INFO['admin_username']}"
-            )
+            try:
+                await update.message.reply_text(
+                    "👋 Welcome! The bot is starting up. Please try again in a few seconds.\n\n"
+                    f"If this persists, contact @{config.CONTACT_INFO.get('admin_username', 'admin')}"
+                )
+            except:
+                pass
     
     async def whoami_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Check your role and permissions"""
@@ -194,10 +225,17 @@ class TelegramReportBot:
             else:
                 role = "NORMAL USER"
             
+            # Get database status
+            db_status = "✅ Connected" if self._db_connected else "❌ Disconnected"
+            uptime = time.time() - self._start_time
+            uptime_str = f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m"
+            
             message = (
                 f"👤 **Your Information**\n\n"
                 f"**User ID:** `{user_id}`\n"
-                f"**Your Role:** `{role}`\n\n"
+                f"**Your Role:** `{role}`\n"
+                f"**Bot Uptime:** `{uptime_str}`\n"
+                f"**Database:** {db_status}\n\n"
                 f"**Permission Checks:**\n"
                 f"• Is Super Admin: {'✅ Yes' if is_super else '❌ No'}\n"
                 f"• Is Owner: {'✅ Yes' if is_owner else '❌ No'}\n"
@@ -243,7 +281,7 @@ class TelegramReportBot:
             "4. Select target and reason\n"
             "5. Confirm and submit\n\n"
             
-            f"**Support:** @{config.CONTACT_INFO['admin_username']}"
+            f"**Support:** @{config.CONTACT_INFO.get('admin_username', 'admin')}"
         )
         
         await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -252,6 +290,11 @@ class TelegramReportBot:
         """Check user balance"""
         try:
             user_id = update.effective_user.id
+            
+            # Ensure database connection
+            if not self._db_connected:
+                await db.ensure_connection()
+            
             user = await db.get_user(user_id)
             
             if not user:
@@ -261,14 +304,16 @@ class TelegramReportBot:
                     first_name=update.effective_user.first_name
                 )
             
-            await update.message.reply_text(
+            balance_text = (
                 f"💰 **Your Balance**\n\n"
-                f"**Tokens:** `{user.tokens}`\n"
-                f"**Reports Made:** `{user.total_reports}`\n"
-                f"**Account Type:** `{user.role.value.upper()}`\n\n"
-                f"Use /buy to purchase more tokens.",
-                parse_mode='Markdown'
+                f"**Tokens:** `{getattr(user, 'tokens', 0)}`\n"
+                f"**Reports Made:** `{getattr(user, 'total_reports', 0)}`\n"
+                f"**Account Type:** `{await self.get_user_role(user_id)}`\n\n"
+                f"Use /buy to purchase more tokens."
             )
+            
+            await update.message.reply_text(balance_text, parse_mode='Markdown')
+            
         except Exception as e:
             logger.error(f"Error in balance command: {e}")
             await update.message.reply_text(
@@ -279,17 +324,17 @@ class TelegramReportBot:
         """Show contact information"""
         contact_text = (
             "📞 **Contact Information**\n\n"
-            f"**Admin:** @{config.CONTACT_INFO['admin_username']}\n"
-            f"**Owner:** @{config.CONTACT_INFO['owner_username']}\n"
-            f"**Support Group:** [Join here]({config.CONTACT_INFO['support_group']})\n"
-            f"**Channel:** [Follow updates]({config.CONTACT_INFO['channel']})\n"
-            f"**Email:** `{config.CONTACT_INFO['email']}`\n\n"
+            f"**Admin:** @{config.CONTACT_INFO.get('admin_username', 'admin')}\n"
+            f"**Owner:** @{config.CONTACT_INFO.get('owner_username', 'owner')}\n"
+            f"**Support Group:** [Join here]({config.CONTACT_INFO.get('support_group', 'https://t.me/support')})\n"
+            f"**Channel:** [Follow updates]({config.CONTACT_INFO.get('channel', 'https://t.me/channel')})\n"
+            f"**Email:** `{config.CONTACT_INFO.get('email', 'support@example.com')}`\n\n"
             "Feel free to reach out for any issues or questions!"
         )
         
         keyboard = [
-            [InlineKeyboardButton("📢 Support Group", url=config.CONTACT_INFO['support_group'])],
-            [InlineKeyboardButton("📱 Channel", url=config.CONTACT_INFO['channel'])]
+            [InlineKeyboardButton("📢 Support Group", url=config.CONTACT_INFO.get('support_group', 'https://t.me/support'))],
+            [InlineKeyboardButton("📱 Channel", url=config.CONTACT_INFO.get('channel', 'https://t.me/channel'))]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -301,15 +346,15 @@ class TelegramReportBot:
     
     async def menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle menu button callbacks"""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        user_id = update.effective_user.id
+        
+        logger.info(f"Menu callback: {data} from user {user_id}")
+        
         try:
-            query = update.callback_query
-            await query.answer()
-            
-            data = query.data
-            user_id = update.effective_user.id
-            
-            logger.info(f"Menu callback: {data} from user {user_id}")
-            
             # Check admin access for admin panel
             if data == "menu_admin":
                 # Check if user has admin privileges directly from config
@@ -366,7 +411,14 @@ class TelegramReportBot:
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors gracefully"""
-        logger.error(f"Update {update} caused error {context.error}")
+        error = context.error
+        
+        # Ignore Conflict errors (multiple instances)
+        if isinstance(error, Conflict):
+            logger.debug("Conflict error ignored (multiple bot instances)")
+            return
+            
+        logger.error(f"Update {update} caused error {error}")
         
         try:
             if update and update.effective_message:
@@ -385,22 +437,37 @@ class TelegramReportBot:
         logger.info(f"ADMIN_IDS: {config.ADMIN_IDS}")
         logger.info(f"OWNER_IDS: {config.OWNER_IDS}")
         logger.info(f"SUPER_ADMIN_ID: {config.SUPER_ADMIN_ID}")
+        logger.info(f"MONGODB_URI: {config.MONGODB_URI[:30]}...")
         
         # Start healthcheck server in a background thread
-        health_thread = threading.Thread(target=start_healthcheck_server, daemon=True)
-        health_thread.start()
-        logger.info("✅ Healthcheck thread started")
-        
-        # Connect to database
         try:
-            connected = await db.connect()
-            if not connected:
-                logger.error("Failed to connect to database!")
-                # Don't exit - let bot run in limited mode
-            else:
-                logger.info("✅ Database connected successfully!")
+            health_thread = threading.Thread(target=start_healthcheck_server, daemon=True)
+            health_thread.start()
+            logger.info("✅ Healthcheck thread started")
         except Exception as e:
-            logger.error(f"Database connection error: {e}")
+            logger.error(f"Failed to start healthcheck server: {e}")
+        
+        # Connect to database with retry
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Database connection attempt {attempt + 1}/{max_retries}")
+                connected = await db.connect()
+                if connected:
+                    self._db_connected = True
+                    logger.info("✅ Database connected successfully!")
+                    break
+                else:
+                    logger.warning(f"Database connection attempt {attempt + 1} failed")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(3)  # Wait 3 seconds before retry
+            except Exception as e:
+                logger.error(f"Database connection error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(3)
+        
+        if not self._db_connected:
+            logger.warning("⚠️ Bot running in limited mode without database")
         
         logger.info("Bot started successfully!")
     
@@ -418,12 +485,15 @@ class TelegramReportBot:
         if not self.check_config():
             sys.exit(1)
         
-        # Create application
-        self.application = Application.builder()\
-            .token(config.BOT_TOKEN)\
-            .post_init(self.post_init)\
-            .post_shutdown(self.post_shutdown)\
-            .build()
+        # Create application with custom settings
+        builder = Application.builder().token(config.BOT_TOKEN)
+        
+        # Add post init/shutdown
+        builder.post_init(self.post_init)
+        builder.post_shutdown(self.post_shutdown)
+        
+        # Build application
+        self.application = builder.build()
         
         # Basic command handlers
         self.application.add_handler(CommandHandler("start", self.start))
@@ -490,22 +560,36 @@ class TelegramReportBot:
     
     async def run(self):
         """Run the bot"""
-        await self.application.initialize()
-        await self.application.start()
-        await self.application.updater.start_polling()
-        
-        logger.info(f"Bot is running. Press Ctrl+C to stop.")
-        
-        # Keep running
         try:
+            await self.application.initialize()
+            await self.application.start()
+            await self.application.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES
+            )
+            
+            logger.info(f"✅ Bot is running. Press Ctrl+C to stop.")
+            
+            # Keep running
             while True:
                 await asyncio.sleep(1)
+                
         except KeyboardInterrupt:
             logger.info("Stopping bot...")
+        except Exception as e:
+            logger.error(f"Fatal error: {e}", exc_info=True)
         finally:
+            await self.stop()
+    
+    async def stop(self):
+        """Stop the bot gracefully"""
+        try:
             await self.application.updater.stop()
             await self.application.stop()
             await self.application.shutdown()
+            logger.info("Bot stopped successfully")
+        except Exception as e:
+            logger.error(f"Error stopping bot: {e}")
 
 def main():
     """Main entry point"""
