@@ -3,23 +3,26 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from datetime import datetime
 import uuid
+import asyncio
 
 from database import db
 from models import UserRole, AccountStatus
 import config
 from utils import encrypt_data
+from telegram_client import tg_client_manager
 
 logger = logging.getLogger(__name__)
 
 # Conversation states
-(PHONE_NUMBER, ACCOUNT_NAME) = range(5, 7)  # Simplified to just 2 states
+(PHONE_NUMBER, OTP_CODE, TWO_FA_PASSWORD, ACCOUNT_NAME) = range(10, 14)
 
 class AuthHandler:
     def __init__(self):
         self.temp_data = {}
+        self.login_sessions = {}  # Store temporary login sessions
     
     async def start_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start the login process for adding a Telegram account - SIMPLIFIED VERSION"""
+        """Start the login process for adding a Telegram account"""
         user_id = update.effective_user.id
         
         # Check if user exists
@@ -38,49 +41,190 @@ class AuthHandler:
             await update.message.reply_text(
                 f"❌ **Account Limit Reached**\n\n"
                 f"You've reached the maximum limit of {config.MAX_ACCOUNTS_PER_USER} accounts.\n"
-                f"Please remove an existing account or contact support to increase your limit.\n\n"
+                f"Please remove an existing account or contact support.\n\n"
                 f"Use /accounts to manage your accounts.",
                 parse_mode='Markdown'
             )
             return ConversationHandler.END
         
-        # Ask for phone number (simplified - just for display)
+        # Ask for phone number
         await update.message.reply_text(
             "📱 **Add Telegram Account**\n\n"
-            "Please enter your phone number (this will be stored for reference):\n"
+            "Please enter your phone number in international format:\n"
             "Example: `+1234567890`\n\n"
-            "⚠️ **Note:** This is a simplified version for testing.\n"
-            "Your account will be created without actual Telegram login.",
+            "⚠️ This will send a real OTP to your Telegram app.",
             parse_mode='Markdown'
         )
         
         return PHONE_NUMBER
     
     async def handle_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle phone number input - SIMPLIFIED"""
+        """Handle phone number input and send OTP"""
         phone = update.message.text.strip()
         user_id = update.effective_user.id
         
-        # Simple validation
-        if not phone.startswith('+'):
-            phone = f"+{phone}"
+        # Validate phone number
+        if not phone.startswith('+') or not phone[1:].replace(' ', '').isdigit():
+            await update.message.reply_text(
+                "❌ **Invalid Phone Number**\n\n"
+                "Please use international format: `+1234567890`\n"
+                "Example: `+919876543210` for India",
+                parse_mode='Markdown'
+            )
+            return PHONE_NUMBER
         
-        # Store in context
-        context.user_data['login_phone'] = phone
+        # Send OTP via Telethon
+        status_msg = await update.message.reply_text("📤 Sending OTP...")
         
-        # Ask for account name
-        await update.message.reply_text(
-            "📝 **Account Name**\n\n"
-            "Please enter a name for this account (e.g., 'Personal', 'Work', 'Backup'):\n\n"
-            "Or send /skip to use default name.",
-            parse_mode='Markdown'
-        )
+        try:
+            result = await tg_client_manager.start_login(phone)
+            
+            if result['success']:
+                # Store client for this user
+                self.login_sessions[user_id] = {
+                    'phone': phone,
+                    'client': result['client']
+                }
+                
+                await status_msg.edit_text(
+                    "📱 **OTP Sent!**\n\n"
+                    "Please enter the 5-digit code you received in Telegram.\n\n"
+                    "If you don't receive it within 30 seconds, try again.",
+                    parse_mode='Markdown'
+                )
+                return OTP_CODE
+            else:
+                await status_msg.edit_text(
+                    f"❌ **Login Failed**\n\n"
+                    f"Error: {result.get('error', 'Unknown error')}",
+                    parse_mode='Markdown'
+                )
+                return ConversationHandler.END
+                
+        except Exception as e:
+            logger.error(f"OTP send error: {e}")
+            await status_msg.edit_text(
+                "❌ Failed to send OTP. Please try again later.",
+                parse_mode='Markdown'
+            )
+            return ConversationHandler.END
+    
+    async def handle_otp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle OTP input"""
+        otp = update.message.text.strip()
+        user_id = update.effective_user.id
         
-        return ACCOUNT_NAME
+        if not otp.isdigit() or (len(otp) != 5 and len(otp) != 6):
+            await update.message.reply_text(
+                "❌ **Invalid OTP**\n\n"
+                "Please enter the 5 or 6-digit code you received."
+            )
+            return OTP_CODE
+        
+        # Get stored session
+        session = self.login_sessions.get(user_id)
+        if not session:
+            await update.message.reply_text(
+                "❌ Session expired. Please start over with /login"
+            )
+            return ConversationHandler.END
+        
+        status_msg = await update.message.reply_text("🔄 Verifying OTP...")
+        
+        try:
+            result = await tg_client_manager.verify_otp(
+                session['client'],
+                session['phone'],
+                otp
+            )
+            
+            if result['success']:
+                # Store session string for later use
+                context.user_data['session_string'] = result['session_string']
+                
+                await status_msg.edit_text(
+                    "✅ **Login Successful!**\n\n"
+                    "Now, please enter a name for this account (e.g., 'Personal', 'Work'):\n\n"
+                    "Send /skip to use default name.",
+                    parse_mode='Markdown'
+                )
+                return ACCOUNT_NAME
+                
+            elif result.get('step') == '2fa_required':
+                # 2FA required
+                await status_msg.edit_text(
+                    "🔐 **Two-Factor Authentication Required**\n\n"
+                    "Please enter your 2FA password:",
+                    parse_mode='Markdown'
+                )
+                return TWO_FA_PASSWORD
+            else:
+                await status_msg.edit_text(
+                    f"❌ **Verification Failed**\n\n"
+                    f"Error: {result.get('error', 'Invalid OTP')}",
+                    parse_mode='Markdown'
+                )
+                return ConversationHandler.END
+                
+        except Exception as e:
+            logger.error(f"OTP verify error: {e}")
+            await status_msg.edit_text(
+                "❌ Verification failed. Please try again.",
+                parse_mode='Markdown'
+            )
+            return ConversationHandler.END
+    
+    async def handle_2fa_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle 2FA password"""
+        password = update.message.text.strip()
+        user_id = update.effective_user.id
+        
+        session = self.login_sessions.get(user_id)
+        if not session:
+            await update.message.reply_text(
+                "❌ Session expired. Please start over with /login"
+            )
+            return ConversationHandler.END
+        
+        status_msg = await update.message.reply_text("🔄 Verifying 2FA...")
+        
+        try:
+            result = await tg_client_manager.verify_otp(
+                session['client'],
+                session['phone'],
+                None,
+                password
+            )
+            
+            if result['success']:
+                context.user_data['session_string'] = result['session_string']
+                
+                await status_msg.edit_text(
+                    "✅ **2FA Verified!**\n\n"
+                    "Now, please enter a name for this account (e.g., 'Personal', 'Work'):\n\n"
+                    "Send /skip to use default name.",
+                    parse_mode='Markdown'
+                )
+                return ACCOUNT_NAME
+            else:
+                await status_msg.edit_text(
+                    f"❌ **2FA Failed**\n\n"
+                    f"Error: {result.get('error', 'Invalid password')}",
+                    parse_mode='Markdown'
+                )
+                return TWO_FA_PASSWORD
+                
+        except Exception as e:
+            logger.error(f"2FA error: {e}")
+            await status_msg.edit_text(
+                "❌ Verification failed. Please try again."
+            )
+            return TWO_FA_PASSWORD
     
     async def handle_account_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle account name input and complete login"""
         account_name = update.message.text.strip()
+        user_id = update.effective_user.id
         
         if len(account_name) > 50:
             await update.message.reply_text(
@@ -90,7 +234,7 @@ class AuthHandler:
         
         context.user_data['account_name'] = account_name
         
-        # Complete the login process
+        # Complete login
         return await self.complete_login(update, context)
     
     async def skip_account_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,21 +243,23 @@ class AuthHandler:
         return await self.complete_login(update, context)
     
     async def complete_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Complete the login process and save account - SIMPLIFIED"""
+        """Complete the login process and save account"""
         user_id = update.effective_user.id
-        phone = context.user_data.get('login_phone', '+1234567890')
-        account_name = context.user_data.get('account_name')
+        session = self.login_sessions.get(user_id)
         
-        # Generate default name if not provided
-        if not account_name:
-            account_name = f"Account {phone[-4:]}"
+        if not session:
+            await update.message.reply_text(
+                "❌ Session expired. Please start over with /login"
+            )
+            return ConversationHandler.END
+        
+        phone = session['phone']
+        session_string = context.user_data.get('session_string')
+        account_name = context.user_data.get('account_name', f"Account {phone[-4:]}")
         
         try:
-            # Create a unique session ID
-            session_id = str(uuid.uuid4())
-            
-            # Encrypt session data (simplified)
-            encrypted_session = encrypt_data(f"session_{user_id}_{datetime.now().timestamp()}")
+            # Encrypt session string
+            encrypted_session = encrypt_data(session_string)
             
             # Add account to database
             account = await db.add_telegram_account(
@@ -124,16 +270,26 @@ class AuthHandler:
                 twofa_password=None
             )
             
-            # Clear temp data
-            context.user_data.pop('login_phone', None)
+            # Clean up
+            del self.login_sessions[user_id]
+            context.user_data.pop('session_string', None)
             context.user_data.pop('account_name', None)
             
-            # Success message
+            # Get user info from Telegram to confirm
+            try:
+                user_info = await tg_client_manager.get_me(session_string)
+                if user_info['success']:
+                    extra_info = f"\n**Telegram ID:** `{user_info['user_id']}`\n**Username:** @{user_info['username'] or 'None'}"
+                else:
+                    extra_info = ""
+            except:
+                extra_info = ""
+            
             success_text = (
                 f"✅ **Account Added Successfully!**\n\n"
                 f"**Account ID:** `{account.account_id[:8]}...`\n"
                 f"**Name:** {account.account_name}\n"
-                f"**Phone:** {account.phone_number}\n"
+                f"**Phone:** {account.phone_number}{extra_info}\n"
                 f"**Status:** Active\n"
                 f"**Primary:** {'Yes ⭐' if account.is_primary else 'No'}\n\n"
                 f"📱 **What's Next?**\n"
@@ -148,10 +304,10 @@ class AuthHandler:
                 parse_mode='Markdown'
             )
             
-            logger.info(f"✅ Account added for user {user_id}: {account_name}")
+            logger.info(f"✅ Real Telegram account added for user {user_id}: {phone}")
             
         except Exception as e:
-            logger.error(f"Login error: {e}")
+            logger.error(f"Login completion error: {e}")
             await update.message.reply_text(
                 "❌ **Login Failed**\n\n"
                 f"Error: {str(e)[:100]}\n\n"
@@ -162,13 +318,23 @@ class AuthHandler:
     
     async def cancel_login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Cancel login process"""
+        user_id = update.effective_user.id
+        
+        # Clean up
+        if user_id in self.login_sessions:
+            try:
+                await self.login_sessions[user_id]['client'].disconnect()
+            except:
+                pass
+            del self.login_sessions[user_id]
+        
         await update.message.reply_text(
             "❌ **Login Cancelled**\n\n"
             "Use /login to try again."
         )
         
         # Clear temp data
-        context.user_data.pop('login_phone', None)
+        context.user_data.pop('session_string', None)
         context.user_data.pop('account_name', None)
             
         return ConversationHandler.END
