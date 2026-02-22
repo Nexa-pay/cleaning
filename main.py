@@ -1,3 +1,29 @@
+import asyncio
+from aiohttp import web
+import threading
+
+# Simple web server for Railway healthcheck
+async def handle_health(request):
+    return web.Response(text="OK", status=200)
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("✅ Healthcheck server running on port 8080")
+
+# Add this function to your TelegramReportBot class
+def start_healthcheck_server(self):
+    """Start healthcheck server in a separate thread"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_web_server())
+    loop.run_forever()
 #!/usr/bin/env python3
 """
 Telegram Advanced Report Bot - Main Entry Point
