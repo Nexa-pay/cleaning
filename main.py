@@ -1,29 +1,3 @@
-import asyncio
-from aiohttp import web
-import threading
-
-# Simple web server for Railway healthcheck
-async def handle_health(request):
-    return web.Response(text="OK", status=200)
-
-async def run_web_server():
-    app = web.Application()
-    app.router.add_get('/', handle_health)
-    app.router.add_get('/health', handle_health)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    print("✅ Healthcheck server running on port 8080")
-
-# Add this function to your TelegramReportBot class
-def start_healthcheck_server(self):
-    """Start healthcheck server in a separate thread"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_web_server())
-    loop.run_forever()
 #!/usr/bin/env python3
 """
 Telegram Advanced Report Bot - Main Entry Point
@@ -34,7 +8,9 @@ import logging
 import asyncio
 import os
 import sys
+import threading
 from datetime import datetime
+from aiohttp import web
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -67,6 +43,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Healthcheck server
+async def handle_health(request):
+    """Handle healthcheck requests"""
+    return web.Response(text="OK", status=200)
+
+async def run_web_server():
+    """Run the healthcheck web server"""
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logger.info("✅ Healthcheck server running on port 8080")
+
+def start_healthcheck_server():
+    """Start healthcheck server in a separate thread"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_web_server())
+    loop.run_forever()
+
 class TelegramReportBot:
     def __init__(self):
         self.application = None
@@ -87,60 +87,78 @@ class TelegramReportBot:
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message with inline buttons"""
-        user = update.effective_user
-        user_id = user.id
-        
-        # Get or create user in database
-        db_user = await db.get_user(user_id)
-        if not db_user:
-            db_user = await db.create_user(
-                user_id=user_id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name
+        try:
+            user = update.effective_user
+            user_id = user.id
+            
+            # Get or create user in database with error handling
+            try:
+                db_user = await db.get_user(user_id)
+                if not db_user:
+                    db_user = await db.create_user(
+                        user_id=user_id,
+                        username=user.username,
+                        first_name=user.first_name,
+                        last_name=user.last_name
+                    )
+                role_text = db_user.role.value.upper()
+                tokens = db_user.tokens
+                total_reports = db_user.total_reports
+            except Exception as e:
+                logger.error(f"Database error in start: {e}")
+                # Fallback values if database fails
+                role_text = "NORMAL"
+                tokens = 0
+                total_reports = 0
+            
+            # Create welcome message
+            welcome_text = (
+                f"👋 **Welcome {user.first_name}!**\n\n"
+                f"🆔 **User ID:** `{user_id}`\n"
+                f"💰 **Tokens:** {tokens}\n"
+                f"📊 **Reports Made:** {total_reports}\n"
+                f"👑 **Role:** {role_text}\n\n"
+                "I'm a comprehensive reporting bot that helps you report:\n"
+                "• 👤 Suspicious users\n"
+                "• 👥 Problematic groups\n"
+                "• 📢 Violating channels\n\n"
+                "**Select an option below:**"
             )
-        
-        # Create welcome message
-        welcome_text = (
-            f"👋 **Welcome {user.first_name}!**\n\n"
-            f"🆔 **User ID:** `{user_id}`\n"
-            f"💰 **Tokens:** {db_user.tokens}\n"
-            f"📊 **Reports Made:** {db_user.total_reports}\n"
-            f"👑 **Role:** {db_user.role.value.upper()}\n\n"
-            "I'm a comprehensive reporting bot that helps you report:\n"
-            "• 👤 Suspicious users\n"
-            "• 👥 Problematic groups\n"
-            "• 📢 Violating channels\n\n"
-            "**Select an option below:**"
-        )
-        
-        # Create inline keyboard
-        keyboard = [
-            [
-                InlineKeyboardButton("📝 Report", callback_data="menu_report"),
-                InlineKeyboardButton("💰 Buy Tokens", callback_data="menu_buy")
-            ],
-            [
-                InlineKeyboardButton("📱 Accounts", callback_data="menu_accounts"),
-                InlineKeyboardButton("📊 My Reports", callback_data="menu_myreports")
-            ],
-            [
-                InlineKeyboardButton("ℹ️ Help", callback_data="menu_help"),
-                InlineKeyboardButton("📞 Contact", callback_data="menu_contact")
+            
+            # Create inline keyboard
+            keyboard = [
+                [
+                    InlineKeyboardButton("📝 Report", callback_data="menu_report"),
+                    InlineKeyboardButton("💰 Buy Tokens", callback_data="menu_buy")
+                ],
+                [
+                    InlineKeyboardButton("📱 Accounts", callback_data="menu_accounts"),
+                    InlineKeyboardButton("📊 My Reports", callback_data="menu_myreports")
+                ],
+                [
+                    InlineKeyboardButton("ℹ️ Help", callback_data="menu_help"),
+                    InlineKeyboardButton("📞 Contact", callback_data="menu_contact")
+                ]
             ]
-        ]
-        
-        # Add admin button for admins
-        if db_user.role in [UserRole.ADMIN, UserRole.OWNER, UserRole.SUPER_ADMIN]:
-            keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="menu_admin")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            welcome_text,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+            
+            # Add admin button for admins (only if we have db_user)
+            if 'db_user' in locals() and db_user and hasattr(db_user, 'role'):
+                if db_user.role in [UserRole.ADMIN, UserRole.OWNER, UserRole.SUPER_ADMIN]:
+                    keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="menu_admin")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                welcome_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error in start command: {e}")
+            await update.message.reply_text(
+                "👋 Welcome! The bot is starting up. Please try again in a few seconds.\n\n"
+                f"If this persists, contact @{config.CONTACT_INFO['admin_username']}"
+            )
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show help information"""
@@ -178,24 +196,30 @@ class TelegramReportBot:
     
     async def balance_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Check user balance"""
-        user_id = update.effective_user.id
-        user = await db.get_user(user_id)
-        
-        if not user:
-            user = await db.create_user(
-                user_id=user_id,
-                username=update.effective_user.username,
-                first_name=update.effective_user.first_name
+        try:
+            user_id = update.effective_user.id
+            user = await db.get_user(user_id)
+            
+            if not user:
+                user = await db.create_user(
+                    user_id=user_id,
+                    username=update.effective_user.username,
+                    first_name=update.effective_user.first_name
+                )
+            
+            await update.message.reply_text(
+                f"💰 **Your Balance**\n\n"
+                f"**Tokens:** `{user.tokens}`\n"
+                f"**Reports Made:** `{user.total_reports}`\n"
+                f"**Account Type:** `{user.role.value.upper()}`\n\n"
+                f"Use /buy to purchase more tokens.",
+                parse_mode='Markdown'
             )
-        
-        await update.message.reply_text(
-            f"💰 **Your Balance**\n\n"
-            f"**Tokens:** `{user.tokens}`\n"
-            f"**Reports Made:** `{user.total_reports}`\n"
-            f"**Account Type:** `{user.role.value.upper()}`\n\n"
-            f"Use /buy to purchase more tokens.",
-            parse_mode='Markdown'
-        )
+        except Exception as e:
+            logger.error(f"Error in balance command: {e}")
+            await update.message.reply_text(
+                "❌ Error checking balance. Please try again later."
+            )
     
     async def contact_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show contact information"""
@@ -223,52 +247,56 @@ class TelegramReportBot:
     
     async def menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle menu button callbacks"""
-        query = update.callback_query
-        await query.answer()
-        
-        data = query.data
-        
-        if data == "menu_report":
-            await query.message.delete()
-            context.user_data['from_menu'] = True
-            await self.report_handler.start_report(update, context)
+        try:
+            query = update.callback_query
+            await query.answer()
             
-        elif data == "menu_buy":
-            await query.message.delete()
-            await self.payment_handler.show_token_packages(update, context)
+            data = query.data
             
-        elif data == "menu_accounts":
-            await query.message.delete()
-            await account_manager.show_accounts(update, context)
-            
-        elif data == "menu_myreports":
-            await query.message.delete()
-            await self.report_handler.my_reports(update, context)
-            
-        elif data == "menu_help":
-            await query.message.delete()
-            await self.help_command(update, context)
-            
-        elif data == "menu_contact":
-            await query.message.delete()
-            await self.contact_command(update, context)
-            
-        elif data == "menu_admin":
-            await query.message.delete()
-            await self.admin_handler.admin_panel(update, context)
-            
-        elif data == "back_to_main":
-            await query.message.delete()
-            await self.start(update, context)
+            if data == "menu_report":
+                await query.message.delete()
+                context.user_data['from_menu'] = True
+                await self.report_handler.start_report(update, context)
+                
+            elif data == "menu_buy":
+                await query.message.delete()
+                await self.payment_handler.show_token_packages(update, context)
+                
+            elif data == "menu_accounts":
+                await query.message.delete()
+                await account_manager.show_accounts(update, context)
+                
+            elif data == "menu_myreports":
+                await query.message.delete()
+                await self.report_handler.my_reports(update, context)
+                
+            elif data == "menu_help":
+                await query.message.delete()
+                await self.help_command(update, context)
+                
+            elif data == "menu_contact":
+                await query.message.delete()
+                await self.contact_command(update, context)
+                
+            elif data == "menu_admin":
+                await query.message.delete()
+                await self.admin_handler.admin_panel(update, context)
+                
+            elif data == "back_to_main":
+                await query.message.delete()
+                await self.start(update, context)
+        except Exception as e:
+            logger.error(f"Error in menu callback: {e}")
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle errors"""
+        """Handle errors gracefully"""
         logger.error(f"Update {update} caused error {context.error}")
         
         try:
             if update and update.effective_message:
                 await update.effective_message.reply_text(
-                    "❌ An error occurred. Please try again later."
+                    "❌ An error occurred. Our team has been notified.\n"
+                    "Please try again later or contact support."
                 )
         except:
             pass
@@ -277,11 +305,21 @@ class TelegramReportBot:
         """Run after bot initialization"""
         logger.info("Bot is starting up...")
         
+        # Start healthcheck server in a background thread
+        health_thread = threading.Thread(target=start_healthcheck_server, daemon=True)
+        health_thread.start()
+        logger.info("✅ Healthcheck thread started")
+        
         # Connect to database
-        connected = await db.connect()
-        if not connected:
-            logger.error("Failed to connect to database!")
-            return
+        try:
+            connected = await db.connect()
+            if not connected:
+                logger.error("Failed to connect to database!")
+                # Don't exit - let bot run in limited mode
+            else:
+                logger.info("✅ Database connected successfully!")
+        except Exception as e:
+            logger.error(f"Database connection error: {e}")
         
         logger.info("Bot started successfully!")
     
