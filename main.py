@@ -291,6 +291,90 @@ async def create_me_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in create_me: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
+async def fixdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnose and fix database connection issues"""
+    user_id = update.effective_user.id
+    
+    message = "🔍 **Database Diagnostic**\n\n"
+    
+    # Check if MONGODB_URI is set
+    if not config.MONGODB_URI:
+        message += "❌ MONGODB_URI is NOT set in environment variables!\n"
+        message += "Please add it to Railway variables.\n"
+        await update.message.reply_text(message, parse_mode='Markdown')
+        return
+    
+    message += f"✅ MONGODB_URI is set: `{config.MONGODB_URI[:30]}...`\n"
+    
+    # Check database object
+    if db is None:
+        message += "❌ Database object is None\n"
+        await update.message.reply_text(message, parse_mode='Markdown')
+        return
+    
+    message += "✅ Database object exists\n"
+    
+    # Try to connect
+    message += "\n🔄 Attempting to connect...\n"
+    try:
+        connected = await db.connect()
+        if connected:
+            message += "✅ Connection successful!\n"
+            if hasattr(self, '_db_connected'):
+                self._db_connected = True
+        else:
+            message += "❌ Connection failed\n"
+    except Exception as e:
+        message += f"❌ Connection error: {str(e)[:100]}\n"
+    
+    # Check if db.db is accessible
+    if db.db is not None:
+        message += "✅ Database handle is available\n"
+        
+        # Try to list collections
+        try:
+            collections = await db.db.list_collection_names()
+            message += f"✅ Collections: {', '.join(collections) or 'None'}\n"
+        except Exception as e:
+            message += f"❌ Cannot list collections: {str(e)[:100]}\n"
+    else:
+        message += "❌ Database handle is None\n"
+    
+    # Check if we can ping
+    try:
+        if db.client:
+            await db.client.admin.command('ping')
+            message += "✅ MongoDB ping successful\n"
+    except Exception as e:
+        message += f"❌ Ping failed: {str(e)[:100]}\n"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+async def testdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple database test"""
+    try:
+        msg = await update.message.reply_text("🔄 Testing database connection...")
+        
+        # Try to connect
+        connected = await db.connect()
+        
+        if connected:
+            await msg.edit_text(
+                "✅ **Database Connected!**\n\n"
+                "Try using /createme to add yourself to the database.",
+                parse_mode='Markdown'
+            )
+        else:
+            await msg.edit_text(
+                "❌ **Database Connection Failed**\n\n"
+                "Please check your MONGODB_URI in Railway variables.\n"
+                "It should look like:\n"
+                "`mongodb+srv://username:password@cluster.mongodb.net/dbname`",
+                parse_mode='Markdown'
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
 # ========== TOKEN COMMANDS ==========
 async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Give tokens to a user (owner only)"""
@@ -633,6 +717,8 @@ class TelegramReportBot:
             "/debug - Debug info\n"
             "/checkdb - Check database status\n"
             "/createme - Add yourself to database\n"
+            "/fixdb - Diagnose database issues\n"
+            "/testdb - Test database connection\n"
             "/login - Add account\n"
             "/accounts - Manage accounts\n"
             "/report - Start report\n"
@@ -950,6 +1036,8 @@ class TelegramReportBot:
         # Database debug commands
         self.application.add_handler(CommandHandler("checkdb", checkdb_command))
         self.application.add_handler(CommandHandler("createme", create_me_command))
+        self.application.add_handler(CommandHandler("fixdb", fixdb_command))
+        self.application.add_handler(CommandHandler("testdb", testdb_command))
         
         # User commands
         self.application.add_handler(CommandHandler("start", self.start))
