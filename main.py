@@ -31,7 +31,7 @@ import config
 
 # Import handlers
 from database import db
-from auth import AuthHandler, PHONE_NUMBER, ACCOUNT_NAME  # Updated imports
+from auth import AuthHandler, PHONE_NUMBER, ACCOUNT_NAME
 from payments import PaymentHandler
 from report_handler import ReportHandler, SELECT_ACCOUNT, REPORT_TYPE, REPORT_TARGET, REPORT_REASON, REPORT_DETAILS, CONFIRMATION, ADMIN_TARGET, ADMIN_REASON
 from admin_handler import AdminHandler
@@ -206,28 +206,57 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Owner only command.")
         return
     
+    # Check if arguments provided
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/givetokens <user_id> <amount>`\n"
+            "Example: `/givetokens 8289517006 100`",
+            parse_mode='Markdown'
+        )
+        return
+    
     try:
         target_id = int(context.args[0])
         amount = int(context.args[1])
         
+        if amount <= 0:
+            await update.message.reply_text("❌ Amount must be positive.")
+            return
+        
+        # Check if database is connected
+        if not db.is_db_connected():
+            await update.message.reply_text("❌ Database not connected. Cannot add tokens.")
+            return
+        
+        # Update tokens
         success = await db.update_user_tokens(target_id, amount)
         
         if success:
             await update.message.reply_text(
-                f"✅ Added {amount} tokens to user {target_id}"
+                f"✅ Added **{amount}** tokens to user `{target_id}`",
+                parse_mode='Markdown'
             )
+            
+            # Try to notify the user
             try:
                 await context.bot.send_message(
                     chat_id=target_id,
-                    text=f"💰 You received {amount} tokens!"
+                    text=f"💰 You received **{amount}** tokens from owner!",
+                    parse_mode='Markdown'
                 )
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Could not notify user {target_id}: {e}")
         else:
-            await update.message.reply_text("❌ Failed to add tokens.")
+            await update.message.reply_text(
+                f"❌ Failed to add tokens. User `{target_id}` may not exist.",
+                parse_mode='Markdown'
+            )
             
-    except (IndexError, ValueError):
-        await update.message.reply_text("Usage: /givetokens <user_id> <amount>")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID or amount. Use numbers only.")
+    except Exception as e:
+        logger.error(f"Error in give_tokens: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
 # ========== MAIN BOT CLASS ==========
 class TelegramReportBot:
@@ -339,6 +368,10 @@ class TelegramReportBot:
             
         except Exception as e:
             logger.error(f"Error in start: {e}")
+            try:
+                await update.message.reply_text("👋 Welcome! Please try again.")
+            except:
+                pass
     
     async def whoami_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Check your role and permissions"""
@@ -454,6 +487,25 @@ class TelegramReportBot:
         
         await update.message.reply_text(contact_text, parse_mode='Markdown')
     
+    async def debug_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Debug callback to see button data"""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        user_id = update.effective_user.id
+        
+        logger.info(f"🔍 DEBUG BUTTON: {data} from user {user_id}")
+        
+        await query.message.reply_text(
+            f"🔍 **Debug Info**\n\n"
+            f"Button pressed: `{data}`\n"
+            f"User ID: `{user_id}`\n"
+            f"Chat ID: `{update.effective_chat.id}`\n\n"
+            f"This is a debug message.",
+            parse_mode='Markdown'
+        )
+    
     async def handle_owner_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle owner feature messages"""
         if context.user_data.get('broadcast_mode'):
@@ -475,8 +527,6 @@ class TelegramReportBot:
             user_id = update.effective_user.id
             
             logger.info(f"📱 Menu callback: {data} from user {user_id}")
-            
-            await query.message.chat.send_action(action="typing")
             
             # Owner Panel
             if data == "menu_owner":
@@ -563,6 +613,10 @@ class TelegramReportBot:
                 
         except Exception as e:
             logger.error(f"❌ Error in menu callback: {e}")
+            try:
+                await query.message.reply_text("❌ An error occurred. Use /start")
+            except:
+                pass
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors gracefully"""
@@ -574,6 +628,14 @@ class TelegramReportBot:
             
         logger.error(f"Update {update} caused error {error}")
         logger.error(traceback.format_exc())
+        
+        try:
+            if update and update.effective_message:
+                await update.effective_message.reply_text(
+                    "❌ An error occurred. Please try again later."
+                )
+        except:
+            pass
     
     async def post_init(self, application: Application):
         """Run after bot initialization"""
@@ -692,6 +754,9 @@ class TelegramReportBot:
             filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
             self.handle_owner_messages
         ))
+        
+        # DEBUG: Temporary callback handler (remove after testing)
+        self.application.add_handler(CallbackQueryHandler(self.debug_callback))
         
         # Callback query handlers
         self.application.add_handler(CallbackQueryHandler(self.menu_callback, pattern='^menu_'))
