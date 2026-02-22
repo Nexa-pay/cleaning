@@ -196,6 +196,101 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Debug command error: {e}")
 
+# ========== DATABASE DEBUG COMMANDS ==========
+async def checkdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check database status"""
+    try:
+        # Check connection
+        is_connected = (db is not None and 
+                       hasattr(db, 'db') and 
+                       db.db is not None)
+        
+        if not is_connected:
+            await update.message.reply_text("❌ Database is not connected!")
+            return
+        
+        # Get counts
+        user_count = await db.get_user_count()
+        account_count = 0
+        report_count = 0
+        transaction_count = 0
+        
+        if db.db:
+            account_count = await db.db.accounts.count_documents({})
+            report_count = await db.db.reports.count_documents({})
+            transaction_count = await db.db.transactions.count_documents({})
+        
+        # Get your user
+        user_id = update.effective_user.id
+        your_user = await db.get_user(user_id)
+        
+        message = (
+            f"📊 **Database Status**\n\n"
+            f"**Connection:** ✅ Connected\n"
+            f"**Database Name:** {config.DATABASE_NAME}\n\n"
+            f"**Collections:**\n"
+            f"• Users: {user_count}\n"
+            f"• Accounts: {account_count}\n"
+            f"• Reports: {report_count}\n"
+            f"• Transactions: {transaction_count}\n\n"
+        )
+        
+        if your_user:
+            message += f"**Your Record:**\n"
+            message += f"• User ID: `{your_user.user_id}`\n"
+            message += f"• Role: {your_user.role.value}\n"
+            message += f"• Tokens: {your_user.tokens}\n"
+        else:
+            message += f"**Your Record:** ❌ Not found in database\n"
+            message += f"Use /createme to add yourself."
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error in checkdb: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def create_me_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Create yourself in the database if you don't exist"""
+    user_id = update.effective_user.id
+    user = update.effective_user
+    
+    try:
+        # Check if user exists
+        db_user = await db.get_user(user_id)
+        
+        if db_user:
+            await update.message.reply_text(
+                f"✅ You already exist in the database!\n"
+                f"User ID: `{user_id}`\n"
+                f"Role: {db_user.role.value}\n"
+                f"Tokens: {db_user.tokens}",
+                parse_mode='Markdown'
+            )
+        else:
+            # Create user
+            new_user = await db.create_user(
+                user_id=user_id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name
+            )
+            
+            # Give some initial tokens
+            await db.update_user_tokens(user_id, 100)
+            
+            await update.message.reply_text(
+                f"✅ **You've been added to the database!**\n\n"
+                f"User ID: `{user_id}`\n"
+                f"Role: {new_user.role.value}\n"
+                f"Tokens: 100 (including bonus)\n\n"
+                f"Use /balance to check your balance.",
+                parse_mode='Markdown'
+            )
+    except Exception as e:
+        logger.error(f"Error in create_me: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
 # ========== TOKEN COMMANDS ==========
 async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Give tokens to a user (owner only)"""
@@ -536,6 +631,8 @@ class TelegramReportBot:
             "/emergency - Emergency test\n"
             "/test - Diagnostic test\n"
             "/debug - Debug info\n"
+            "/checkdb - Check database status\n"
+            "/createme - Add yourself to database\n"
             "/login - Add account\n"
             "/accounts - Manage accounts\n"
             "/report - Start report\n"
@@ -850,6 +947,10 @@ class TelegramReportBot:
         self.application.add_handler(CommandHandler("test", test_command))
         self.application.add_handler(CommandHandler("debug", debug_command))
         
+        # Database debug commands
+        self.application.add_handler(CommandHandler("checkdb", checkdb_command))
+        self.application.add_handler(CommandHandler("createme", create_me_command))
+        
         # User commands
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -871,7 +972,7 @@ class TelegramReportBot:
         self.application.add_handler(CommandHandler("stats", self.admin_handler.show_statistics))
         self.application.add_handler(CommandHandler("verify", self.payment_handler.admin_verify_payment))
         
-        # Login conversation - UPDATED with new states
+        # Login conversation
         login_conv = ConversationHandler(
             entry_points=[CommandHandler('login', self.auth_handler.start_login)],
             states={
