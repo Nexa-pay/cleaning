@@ -67,6 +67,7 @@ class Database:
             
         # Users collection indexes
         await self.db.users.create_index("user_id", unique=True)
+        await self.db.users.create_index("username")  # For username searches
         
         # Accounts collection indexes
         await self.db.accounts.create_index([("user_id", 1), ("account_id", 1)], unique=True)
@@ -77,6 +78,7 @@ class Database:
         
         # Transactions collection indexes
         await self.db.transactions.create_index("transaction_id", unique=True)
+        await self.db.transactions.create_index("created_at", -1)  # For sorting
         
         # Reports collection indexes
         await self.db.reports.create_index("report_id", unique=True)
@@ -155,6 +157,24 @@ class Database:
             return None
         except Exception as e:
             logger.error(f"Error getting user {user_id}: {e}")
+            return None
+    
+    async def get_user_by_username(self, username: str) -> Optional[User]:
+        """Get user by username"""
+        if not await self.ensure_connection():
+            return None
+        
+        try:
+            # Remove @ if present
+            if username.startswith('@'):
+                username = username[1:]
+            
+            user_data = await self.db.users.find_one({"username": username})
+            if user_data:
+                return User.from_dict(user_data)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting user by username {username}: {e}")
             return None
     
     async def create_user(self, user_id: int, username: str, first_name: str, 
@@ -635,6 +655,22 @@ class Database:
             return transactions
         except Exception as e:
             logger.error(f"Error getting transactions for {user_id}: {e}")
+            return []
+    
+    # ========== NEW: Recent Transactions Method ==========
+    async def get_recent_transactions(self, limit: int = 20) -> List[Transaction]:
+        """Get recent transactions across all users"""
+        if not await self.ensure_connection():
+            return []
+        
+        try:
+            cursor = self.db.transactions.find().sort("created_at", -1).limit(limit)
+            transactions = []
+            async for doc in cursor:
+                transactions.append(Transaction(**doc))
+            return transactions
+        except Exception as e:
+            logger.error(f"Error getting recent transactions: {e}")
             return []
     
     # ========== Token Packages Methods ==========
