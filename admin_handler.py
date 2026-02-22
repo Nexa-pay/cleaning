@@ -144,6 +144,16 @@ class AdminHandler:
                 await self.unblock_user(update, context)
             elif data.startswith("add_tokens_"):
                 await self.add_tokens_menu(update, context)
+            elif data == "bulk_add_tokens":
+                await self.bulk_add_tokens(update, context)
+            elif data == "token_stats":
+                await self.token_stats(update, context)
+            elif data == "token_transactions":
+                await self.token_transactions(update, context)
+            elif data == "pending_payments":
+                await self.pending_payments(update, context)
+            elif data == "manage_packages":
+                await self.manage_packages(update, context)
             else:
                 await query.edit_message_text(f"❓ Unknown action: {data}")
                 
@@ -398,13 +408,17 @@ class AdminHandler:
             logger.error(f"Error in user_management: {e}")
             await query.edit_message_text("❌ Error loading user management.")
     
+    # ========== TOKEN MANAGEMENT METHODS ==========
+    
     async def token_management(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Token management interface"""
+        """Enhanced token management interface"""
         try:
             query = update.callback_query
             
             # Get token stats
             total_tokens = 0
+            pending_count = 0
+            total_transactions = 0
             
             try:
                 if db and db.db is not None:
@@ -414,12 +428,17 @@ class AdminHandler:
                     ]
                     result = await db.db.transactions.aggregate(pipeline).to_list(1)
                     total_tokens = result[0]['total'] if result else 0
+                    
+                    pending_count = await db.db.transactions.count_documents({"status": "pending"})
+                    total_transactions = await db.db.transactions.count_documents({})
             except Exception as e:
                 logger.error(f"Error getting token stats: {e}")
             
             message = (
                 f"💰 **Token Management**\n\n"
-                f"**Total Tokens Sold:** {total_tokens}\n"
+                f"**Total Tokens Issued:** {total_tokens}\n"
+                f"**Pending Payments:** {pending_count}\n"
+                f"**Total Transactions:** {total_transactions}\n"
                 f"**Token Price:** ⭐{config.TOKEN_PRICE_STARS} / ₹{config.TOKEN_PRICE_INR}\n"
                 f"**Report Cost:** {config.REPORT_COST_IN_TOKENS} tokens\n\n"
                 f"**Select an option:**"
@@ -427,17 +446,501 @@ class AdminHandler:
             
             keyboard = [
                 [InlineKeyboardButton("➕ Add Tokens to User", callback_data="add_tokens_menu")],
-                [InlineKeyboardButton("📊 Token Packages", callback_data="manage_packages")],
-                [InlineKeyboardButton("📈 Transaction History", callback_data="transaction_history")],
+                [InlineKeyboardButton("📊 Bulk Add Tokens", callback_data="bulk_add_tokens")],
+                [InlineKeyboardButton("📈 Token Statistics", callback_data="token_stats")],
+                [InlineKeyboardButton("📋 Transaction History", callback_data="token_transactions")],
                 [InlineKeyboardButton("⏳ Pending Payments", callback_data="pending_payments")],
+                [InlineKeyboardButton("📦 Manage Packages", callback_data="manage_packages")],
                 [InlineKeyboardButton("🔙 Back", callback_data="admin_back")]
             ]
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+            
         except Exception as e:
             logger.error(f"Error in token_management: {e}")
             await query.edit_message_text("❌ Error loading token management.")
+    
+    async def add_tokens_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show menu to add tokens to user"""
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            # Check if this is called from user info or main menu
+            if query.data.startswith("add_tokens_"):
+                user_id = int(query.data.replace("add_tokens_", ""))
+                context.user_data['token_user_id'] = user_id
+                
+                await query.edit_message_text(
+                    f"💰 **Add Tokens to User `{user_id}`**\n\n"
+                    f"Please enter the number of tokens to add:\n"
+                    f"Format: `<amount>`\n"
+                    f"Example: `100`",
+                    parse_mode='Markdown'
+                )
+            else:
+                # General add tokens menu
+                await query.edit_message_text(
+                    "💰 **Add Tokens to User**\n\n"
+                    "Please enter the user ID and amount in this format:\n"
+                    "`<user_id> <amount>`\n\n"
+                    "Examples:\n"
+                    "• `123456789 100`\n"
+                    "• `8289517006 50`\n\n"
+                    "Or click below for advanced options:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ Add to Current User", callback_data="add_to_current")],
+                        [InlineKeyboardButton("📊 Bulk Add", callback_data="bulk_add_tokens")],
+                        [InlineKeyboardButton("🔙 Back", callback_data="admin_tokens")]
+                    ]),
+                    parse_mode='Markdown'
+                )
+            
+            context.user_data['awaiting_token_input'] = True
+            
+        except Exception as e:
+            logger.error(f"Error in add_tokens_menu: {e}")
+            await query.edit_message_text("❌ Error loading token menu.")
+    
+    async def process_token_addition(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process token addition from text input"""
+        if not context.user_data.get('awaiting_token_input'):
+            return
+        
+        try:
+            text = update.message.text.strip()
+            user_id = update.effective_user.id
+            
+            # Check if we have a specific user ID from context
+            target_user_id = context.user_data.get('token_user_id')
+            
+            if target_user_id:
+                # Simple format: just amount
+                try:
+                    amount = int(text)
+                    if amount <= 0:
+                        await update.message.reply_text("❌ Amount must be positive.")
+                        return
+                    
+                    target_id = target_user_id
+                except ValueError:
+                    await update.message.reply_text("❌ Please enter a valid number.")
+                    return
+            else:
+                # Format: user_id amount
+                parts = text.split()
+                if len(parts) != 2:
+                    await update.message.reply_text(
+                        "❌ Invalid format. Please use: `<user_id> <amount>`\n"
+                        "Example: `123456789 100`"
+                    )
+                    return
+                
+                try:
+                    target_id = int(parts[0])
+                    amount = int(parts[1])
+                    
+                    if amount <= 0:
+                        await update.message.reply_text("❌ Amount must be positive.")
+                        return
+                except ValueError:
+                    await update.message.reply_text("❌ Invalid numbers. Use integers only.")
+                    return
+            
+            # Check if user exists
+            user = await db.get_user(target_id)
+            if not user:
+                # Create user if doesn't exist
+                user = await db.create_user(
+                    user_id=target_id,
+                    username="unknown",
+                    first_name=f"User {target_id}"
+                )
+            
+            # Add tokens
+            success = await db.update_user_tokens(target_id, amount)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ **Successfully Added Tokens**\n\n"
+                    f"**User ID:** `{target_id}`\n"
+                    f"**Amount:** `{amount}` tokens\n"
+                    f"**New Balance:** `{user.tokens + amount}` tokens",
+                    parse_mode='Markdown'
+                )
+                
+                # Try to notify user
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_id,
+                        text=f"💰 **You received {amount} tokens!**\n\n"
+                             f"Your new balance: {user.tokens + amount} tokens",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+            else:
+                await update.message.reply_text("❌ Failed to add tokens.")
+            
+            # Clear context data
+            context.user_data['awaiting_token_input'] = False
+            context.user_data.pop('token_user_id', None)
+            
+        except Exception as e:
+            logger.error(f"Error processing token addition: {e}")
+            await update.message.reply_text("❌ An error occurred.")
+    
+    async def bulk_add_tokens(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Bulk add tokens to multiple users"""
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            await query.edit_message_text(
+                "📊 **Bulk Token Addition**\n\n"
+                "Send a list of user IDs and amounts in this format:\n"
+                "`user_id1 amount1`\n"
+                "`user_id2 amount2`\n"
+                "`user_id3 amount3`\n\n"
+                "Example:\n"
+                "`123456789 50`\n"
+                "`987654321 100`\n"
+                "`555555555 25`\n\n"
+                "**Maximum 20 users at a time.**\n\n"
+                "Send /cancel to abort.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Back", callback_data="admin_tokens")
+                ]]),
+                parse_mode='Markdown'
+            )
+            context.user_data['awaiting_bulk_token'] = True
+            
+        except Exception as e:
+            logger.error(f"Error in bulk_add_tokens: {e}")
+            await query.edit_message_text("❌ Error loading bulk token menu.")
+    
+    async def process_bulk_tokens(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process bulk token addition"""
+        if not context.user_data.get('awaiting_bulk_token'):
+            return
+        
+        try:
+            text = update.message.text.strip()
+            lines = text.split('\n')
+            
+            if len(lines) > 20:
+                await update.message.reply_text("❌ Too many entries. Maximum 20.")
+                return
+            
+            results = []
+            success_count = 0
+            fail_count = 0
+            total_tokens = 0
+            
+            for i, line in enumerate(lines, 1):
+                try:
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    parts = line.split()
+                    if len(parts) != 2:
+                        results.append(f"{i}. ❌ Invalid format: {line}")
+                        fail_count += 1
+                        continue
+                    
+                    user_id = int(parts[0])
+                    amount = int(parts[1])
+                    
+                    if amount <= 0:
+                        results.append(f"{i}. ❌ User {user_id}: Amount must be positive")
+                        fail_count += 1
+                        continue
+                    
+                    # Check if user exists
+                    user = await db.get_user(user_id)
+                    if not user:
+                        user = await db.create_user(
+                            user_id=user_id,
+                            username="unknown",
+                            first_name=f"User {user_id}"
+                        )
+                    
+                    # Add tokens
+                    success = await db.update_user_tokens(user_id, amount)
+                    
+                    if success:
+                        results.append(f"{i}. ✅ User {user_id}: +{amount} tokens")
+                        success_count += 1
+                        total_tokens += amount
+                        
+                        # Try to notify user
+                        try:
+                            await context.bot.send_message(
+                                chat_id=user_id,
+                                text=f"💰 **You received {amount} tokens!**",
+                                parse_mode='Markdown'
+                            )
+                        except:
+                            pass
+                    else:
+                        results.append(f"{i}. ❌ User {user_id}: Failed to add tokens")
+                        fail_count += 1
+                        
+                except ValueError:
+                    results.append(f"{i}. ❌ Invalid numbers: {line}")
+                    fail_count += 1
+                except Exception as e:
+                    results.append(f"{i}. ❌ Error: {line} - {str(e)[:50]}")
+                    fail_count += 1
+            
+            # Send results
+            result_text = (
+                f"📊 **Bulk Token Addition Results**\n\n"
+                f"✅ Successful: {success_count}\n"
+                f"❌ Failed: {fail_count}\n"
+                f"💰 Total Tokens Added: {total_tokens}\n\n"
+            )
+            
+            # Add first 15 results
+            for r in results[:15]:
+                result_text += f"{r}\n"
+            
+            if len(results) > 15:
+                result_text += f"... and {len(results) - 15} more"
+            
+            await update.message.reply_text(result_text, parse_mode='Markdown')
+            
+            context.user_data['awaiting_bulk_token'] = False
+            
+        except Exception as e:
+            logger.error(f"Error in bulk token processing: {e}")
+            await update.message.reply_text("❌ Error processing bulk tokens.")
+    
+    async def token_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show token statistics"""
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            # Get token stats
+            total_users = await db.get_user_count()
+            total_tokens_issued = 0
+            total_tokens_used = 0
+            top_users = []
+            
+            try:
+                if db and db.db:
+                    # Total tokens issued
+                    pipeline = [
+                        {"$match": {"status": "completed"}},
+                        {"$group": {"_id": None, "total": {"$sum": "$tokens_purchased"}}}
+                    ]
+                    result = await db.db.transactions.aggregate(pipeline).to_list(1)
+                    total_tokens_issued = result[0]['total'] if result else 0
+                    
+                    # Total tokens used (from reports)
+                    report_pipeline = [
+                        {"$group": {"_id": None, "total": {"$sum": "$tokens_used"}}}
+                    ]
+                    report_result = await db.db.reports.aggregate(report_pipeline).to_list(1)
+                    total_tokens_used = report_result[0]['total'] if report_result else 0
+                    
+                    # Get top users by tokens
+                    cursor = db.db.users.find().sort("tokens", -1).limit(10)
+                    top_users = await cursor.to_list(length=10)
+            except Exception as e:
+                logger.error(f"Error getting token stats: {e}")
+            
+            message = (
+                f"📊 **Token Statistics**\n\n"
+                f"**Total Users:** {total_users}\n"
+                f"**Total Tokens Issued:** {total_tokens_issued}\n"
+                f"**Total Tokens Used:** {total_tokens_used}\n"
+                f"**Active Tokens:** {total_tokens_issued - total_tokens_used}\n\n"
+                f"**Top Users by Tokens:**\n"
+            )
+            
+            for i, user in enumerate(top_users[:5], 1):
+                username = user.get('username', 'Unknown')
+                tokens = user.get('tokens', 0)
+                message += f"{i}. `{username}`: {tokens} tokens\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("➕ Add Tokens", callback_data="add_tokens_menu")],
+                [InlineKeyboardButton("📋 Transactions", callback_data="token_transactions")],
+                [InlineKeyboardButton("🔙 Back", callback_data="admin_tokens")]
+            ]
+            
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in token_stats: {e}")
+            await query.edit_message_text("❌ Error loading token statistics.")
+    
+    async def token_transactions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View token transaction history"""
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            # Get recent token transactions
+            transactions = []
+            try:
+                if db and db.db:
+                    cursor = db.db.transactions.find().sort("created_at", -1).limit(20)
+                    transactions = await cursor.to_list(length=20)
+            except Exception as e:
+                logger.error(f"Error getting transactions: {e}")
+            
+            if not transactions:
+                await query.edit_message_text(
+                    "📊 **No Token Transactions Found**",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="admin_tokens")
+                    ]]),
+                    parse_mode='Markdown'
+                )
+                return
+            
+            message = "📊 **Recent Token Transactions**\n\n"
+            
+            for t in transactions[:10]:
+                date_str = t.get('created_at', datetime.now())
+                if hasattr(date_str, 'strftime'):
+                    date_str = date_str.strftime('%Y-%m-%d %H:%M')
+                else:
+                    date_str = 'Unknown'
+                    
+                status_emoji = "✅" if t.get('status') == "completed" else "⏳"
+                message += (
+                    f"{status_emoji} **User:** `{t.get('user_id')}`\n"
+                    f"   **Amount:** `{t.get('tokens_purchased')}` tokens\n"
+                    f"   **Method:** {t.get('payment_method', 'Unknown')}\n"
+                    f"   **Date:** {date_str}\n\n"
+                )
+            
+            if len(transactions) > 10:
+                message += f"... and {len(transactions) - 10} more"
+            
+            keyboard = [
+                [InlineKeyboardButton("🔄 Refresh", callback_data="token_transactions")],
+                [InlineKeyboardButton("🔙 Back", callback_data="admin_tokens")]
+            ]
+            
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in token_transactions: {e}")
+            await query.edit_message_text("❌ Error loading transactions.")
+    
+    async def pending_payments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show pending payments"""
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            # Get pending transactions
+            transactions = []
+            try:
+                if db and db.db:
+                    cursor = db.db.transactions.find({"status": "pending"}).sort("created_at", -1).limit(20)
+                    transactions = await cursor.to_list(length=20)
+            except Exception as e:
+                logger.error(f"Error getting pending payments: {e}")
+            
+            if not transactions:
+                await query.edit_message_text(
+                    "✅ **No Pending Payments**\n\n"
+                    "All payments have been processed.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="admin_tokens")
+                    ]]),
+                    parse_mode='Markdown'
+                )
+                return
+            
+            message = "⏳ **Pending Payments**\n\n"
+            keyboard = []
+            
+            for t in transactions[:5]:
+                txn_id = t.get('transaction_id', 'Unknown')[:8]
+                amount = t.get('amount', 0)
+                method = t.get('payment_method', 'Unknown')
+                user_id = t.get('user_id', 'Unknown')
+                
+                message += (
+                    f"**ID:** `{txn_id}...`\n"
+                    f"**User:** `{user_id}`\n"
+                    f"**Amount:** ₹{amount}\n"
+                    f"**Method:** {method}\n\n"
+                )
+                
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"✅ Verify {txn_id}",
+                        callback_data=f"verify_payment_{t.get('transaction_id')}"
+                    )
+                ])
+            
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_tokens")])
+            
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in pending_payments: {e}")
+            await query.edit_message_text("❌ Error loading pending payments.")
+    
+    async def manage_packages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Manage token packages"""
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            # Get packages
+            packages = await db.get_token_packages()
+            
+            message = "📦 **Token Packages**\n\n"
+            
+            for p in packages:
+                message += (
+                    f"**{p.name}**\n"
+                    f"• Tokens: {p.tokens}\n"
+                    f"• Stars: ⭐{p.price_stars}\n"
+                    f"• UPI: ₹{p.price_inr}\n"
+                    f"• {p.description}\n\n"
+                )
+            
+            message += "Package settings can be configured in environment variables."
+            
+            keyboard = [
+                [InlineKeyboardButton("🔙 Back", callback_data="admin_tokens")]
+            ]
+            
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in manage_packages: {e}")
+            await query.edit_message_text("❌ Error loading packages.")
+    
+    # ========== END TOKEN MANAGEMENT METHODS ==========
     
     async def show_statistics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show bot statistics"""
@@ -639,20 +1142,3 @@ class AdminHandler:
         except Exception as e:
             logger.error(f"Error in unblock_user: {e}")
             await query.edit_message_text("❌ Error unblocking user.")
-    
-    async def add_tokens_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show menu to add tokens to user"""
-        try:
-            query = update.callback_query
-            user_id = int(query.data.replace("add_tokens_", ""))
-            
-            context.user_data['token_user_id'] = user_id
-            
-            await query.edit_message_text(
-                f"💰 **Add Tokens to User `{user_id}`**\n\n"
-                f"Please enter the number of tokens to add:",
-                parse_mode='Markdown'
-            )
-        except Exception as e:
-            logger.error(f"Error in add_tokens_menu: {e}")
-            await query.edit_message_text("❌ Error loading token menu.")
