@@ -31,7 +31,7 @@ import config
 
 # Import handlers
 from database import db
-from auth import AuthHandler, PHONE_NUMBER, OTP_CODE, TWO_FA_PASSWORD, ACCOUNT_NAME  # Updated imports
+from auth import AuthHandler, PHONE_NUMBER, OTP_CODE, TWO_FA_PASSWORD, ACCOUNT_NAME
 from payments import PaymentHandler
 from report_handler import ReportHandler, SELECT_ACCOUNT, REPORT_TYPE, REPORT_TARGET, REPORT_REASON, REPORT_DETAILS, CONFIRMATION, ADMIN_TARGET, ADMIN_REASON
 from admin_handler import AdminHandler
@@ -255,7 +255,8 @@ async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Error: {e}")
 
-async def owner_add_tokens_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== OWNER TOKEN MANAGEMENT COMMANDS ==========
+async def owner_add_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner command to add tokens (usage: /addtokens @username 100)"""
     user_id = update.effective_user.id
     
@@ -329,7 +330,7 @@ async def owner_add_tokens_command(self, update: Update, context: ContextTypes.D
         logger.error(f"Error in addtokens: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
-async def owner_token_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def owner_token_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show token statistics"""
     user_id = update.effective_user.id
     
@@ -361,12 +362,15 @@ async def owner_token_stats_command(self, update: Update, context: ContextTypes.
         logger.error(f"Error in token stats: {e}")
         await update.message.reply_text("❌ Error fetching statistics.")
 
-async def handle_bulk_token_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== BULK TOKEN INPUT HANDLER ==========
+async def handle_bulk_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle bulk token input"""
     if context.user_data.get('awaiting_bulk_tokens'):
-        await self.admin_handler.process_bulk_tokens(update, context)
+        # This would need to be implemented in admin_handler
+        await update.message.reply_text("Bulk token processing coming soon...")
     elif context.user_data.get('awaiting_token_input'):
-        await self.admin_handler.process_token_addition(update, context)
+        # This would need to be implemented in admin_handler
+        await update.message.reply_text("Token addition processing coming soon...")
 
 # ========== MAIN BOT CLASS ==========
 class TelegramReportBot:
@@ -586,15 +590,46 @@ class TelegramReportBot:
             logger.error(f"Error in balance: {e}")
     
     async def contact_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show contact information"""
-        contact_text = (
-            "📞 **Contact Information**\n\n"
-            f"**Admin:** @{config.CONTACT_INFO.get('admin_username', 'admin')}\n"
-            f"**Owner:** @{config.CONTACT_INFO.get('owner_username', 'owner')}\n"
-            f"**Support Group:** [Join]({config.CONTACT_INFO.get('support_group', 'https://t.me/support')})"
-        )
-        
-        await update.message.reply_text(contact_text, parse_mode='Markdown')
+        """Show contact information - FIXED VERSION"""
+        try:
+            contact_text = (
+                "📞 **Contact Information**\n\n"
+                f"**Admin:** @{config.CONTACT_INFO.get('admin_username', 'admin')}\n"
+                f"**Owner:** @{config.CONTACT_INFO.get('owner_username', 'owner')}\n"
+                f"**Support Group:** [Join]({config.CONTACT_INFO.get('support_group', 'https://t.me/support')})\n\n"
+                "For urgent issues, please contact admin directly."
+            )
+            
+            keyboard = [
+                [InlineKeyboardButton("📢 Support Group", url=config.CONTACT_INFO.get('support_group', 'https://t.me/support'))],
+                [InlineKeyboardButton("👤 Contact Admin", url=f"https://t.me/{config.CONTACT_INFO.get('admin_username', 'admin')}")],
+                [InlineKeyboardButton("🔙 Main Menu", callback_data="back_to_main")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if update.message:
+                await update.message.reply_text(
+                    contact_text,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            elif update.callback_query:
+                await update.callback_query.edit_message_text(
+                    contact_text,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in contact command: {e}")
+            try:
+                error_msg = "❌ Error loading contact info. Please try again."
+                if update.message:
+                    await update.message.reply_text(error_msg)
+                elif update.callback_query:
+                    await update.callback_query.edit_message_text(error_msg)
+            except:
+                pass
     
     async def freetokens_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get free tokens for testing"""
