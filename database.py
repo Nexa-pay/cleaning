@@ -295,6 +295,49 @@ class Database:
     
     # ========== Account Methods ==========
     
+    async def add_telegram_account(self, user_id: int, phone_number: str, 
+                                  session_string: str, account_name: str,
+                                  twofa_password: str = None) -> Optional[TelegramAccount]:
+        """Add a new Telegram account for reporting"""
+        if not await self.ensure_connection():
+            # Return a temporary account
+            return TelegramAccount(
+                account_id=str(uuid.uuid4()),
+                user_id=user_id,
+                phone_number=phone_number,
+                session_string=session_string,
+                account_name=account_name,
+                twofa_password=twofa_password,
+                is_primary=False,
+                status=AccountStatus.ACTIVE
+            )
+        
+        try:
+            # Check account limit
+            account_count = await self.db.accounts.count_documents({"user_id": user_id})
+            
+            # Encrypt sensitive data
+            encrypted_session = encrypt_data(session_string)
+            encrypted_2fa = encrypt_data(twofa_password) if twofa_password else None
+            
+            account = TelegramAccount(
+                account_id=str(uuid.uuid4()),
+                user_id=user_id,
+                phone_number=phone_number,
+                session_string=encrypted_session,
+                account_name=account_name,
+                twofa_password=encrypted_2fa,
+                is_primary=(account_count == 0),  # First account is primary
+                status=AccountStatus.ACTIVE
+            )
+            
+            await self.db.accounts.insert_one(account.to_dict())
+            logger.info(f"✅ New account added for user {user_id}: {account_name}")
+            return account
+        except Exception as e:
+            logger.error(f"Error adding account: {e}")
+            return None
+    
     async def get_user_accounts(self, user_id: int) -> List[TelegramAccount]:
         """Get all accounts for a user"""
         if not await self.ensure_connection():
@@ -361,6 +404,34 @@ class Database:
             logger.error(f"Error setting primary account: {e}")
             return False
     
+    async def update_account_last_used(self, account_id: str):
+        """Update account's last used timestamp"""
+        if not await self.ensure_connection():
+            return
+            
+        try:
+            await self.db.accounts.update_one(
+                {"account_id": account_id},
+                {
+                    "$set": {"last_used": datetime.now()},
+                    "$inc": {"total_reports_used": 1}
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error updating account last used: {e}")
+    
+    async def delete_account(self, account_id: str) -> bool:
+        """Delete an account"""
+        if not await self.ensure_connection():
+            return False
+            
+        try:
+            result = await self.db.accounts.delete_one({"account_id": account_id})
+            return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"Error deleting account: {e}")
+            return False
+    
     # ========== Report Methods ==========
     
     async def create_report(self, user_id: int, account_id: str, report_type: str,
@@ -397,6 +468,10 @@ class Database:
             )
             
             await self.db.reports.insert_one(report.to_dict())
+            
+            # Update account last used
+            await self.update_account_last_used(account_id)
+            
             logger.info(f"✅ New report created: {report.report_id}")
             return report
         except Exception as e:
