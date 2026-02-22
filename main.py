@@ -76,8 +76,42 @@ def start_healthcheck_server():
     finally:
         loop.close()
 
-# ========== TEST COMMANDS ==========
+# ========== EMERGENCY TEST COMMAND ==========
+async def emergency_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Emergency test command that works without database"""
+    try:
+        user = update.effective_user
+        # Check database properly - don't use bool() on Motor objects
+        db_status = "❌ Not Connected"
+        if db is not None:
+            if hasattr(db, 'db') and db.db is not None:
+                try:
+                    # Try a simple operation to test connection
+                    await db.db.command('ping')
+                    db_status = "✅ Connected and working"
+                except:
+                    db_status = "⚠️ Connected but not responding"
+            else:
+                db_status = "❌ Database object exists but no connection"
+        else:
+            db_status = "❌ Database object is None"
+            
+        await update.message.reply_text(
+            f"✅ **EMERGENCY TEST PASSED**\n\n"
+            f"**Bot is receiving commands!**\n\n"
+            f"Your ID: `{user.id}`\n"
+            f"Your Name: {user.first_name}\n"
+            f"Bot Username: @{context.bot.username}\n\n"
+            f"**Status:**\n"
+            f"• Database: {db_status}\n"
+            f"• Config loaded: ✅\n\n"
+            f"Send /test for more details.",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Emergency test error: {str(e)}")
 
+# ========== TEST COMMANDS ==========
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Simple ping command to test if bot is responding"""
     try:
@@ -87,10 +121,22 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ping command error: {e}")
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test command to check database connection"""
+    """Test command to check database connection - FIXED VERSION"""
     try:
-        # Check database
-        db_status = "✅ Connected" if db and db.db else "❌ Not Connected"
+        # Check database properly - don't use bool() on Motor objects
+        db_status = "❌ Not Connected"
+        if db is not None:
+            if hasattr(db, 'db') and db.db is not None:
+                try:
+                    # Try a simple operation to test connection
+                    await db.db.command('ping')
+                    db_status = "✅ Connected and working"
+                except Exception as e:
+                    db_status = f"⚠️ Connected but error: {str(e)[:50]}"
+            else:
+                db_status = "❌ Database object exists but no connection"
+        else:
+            db_status = "❌ Database object is None"
         
         # Get user info
         user = update.effective_user
@@ -100,13 +146,18 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_owner = (user.id in config.OWNER_IDS)
         is_admin = (user.id in config.ADMIN_IDS)
         
+        # Get MongoDB URI preview (safely)
+        uri_preview = "Not set"
+        if config.MONGODB_URI:
+            uri_preview = config.MONGODB_URI[:30] + "..."
+        
         message = (
             f"🔧 **Bot Diagnostic Test**\n\n"
             f"**User:** {user.first_name}\n"
             f"**User ID:** `{user.id}`\n"
             f"**Database:** {db_status}\n"
             f"**Bot Token:** {'✅ Set' if config.BOT_TOKEN else '❌ Missing'}\n"
-            f"**MongoDB URI:** {'✅ Set' if config.MONGODB_URI else '❌ Missing'}\n\n"
+            f"**MongoDB URI:** {uri_preview}\n\n"
             f"**Role Checks:**\n"
             f"• Super Admin: {'✅ Yes' if is_super else '❌ No'}\n"
             f"• Owner: {'✅ Yes' if is_owner else '❌ No'}\n"
@@ -177,6 +228,12 @@ class TelegramReportBot:
         else:
             return "NORMAL USER"
     
+    def is_db_connected(self):
+        """Safely check if database is connected"""
+        return (db is not None and 
+                hasattr(db, 'db') and 
+                db.db is not None)
+    
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message with inline buttons"""
         try:
@@ -193,8 +250,8 @@ class TelegramReportBot:
             total_reports = 0
             
             try:
-                # Only try database if we think it might be connected
-                if db and db.db:
+                # Only try database if it's actually connected
+                if self.is_db_connected():
                     db_user = await db.get_user(user_id)
                     if db_user:
                         tokens = getattr(db_user, 'tokens', 0)
@@ -287,7 +344,7 @@ class TelegramReportBot:
                 role = "NORMAL USER"
             
             # Get database status
-            db_status = "✅ Connected" if (db and db.db) else "❌ Disconnected"
+            db_status = "✅ Connected" if self.is_db_connected() else "❌ Disconnected"
             uptime = time.time() - self._start_time
             uptime_str = f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m"
             
@@ -321,6 +378,7 @@ class TelegramReportBot:
             "/help - Show this help\n"
             "/whoami - Check your role\n"
             "/ping - Test if bot is working\n"
+            "/emergency - Emergency test\n"
             "/test - Run diagnostic test\n"
             "/debug - Debug information\n"
             "/login - Add Telegram account\n"
@@ -361,7 +419,7 @@ class TelegramReportBot:
             role = await self.get_user_role(user_id)
             
             try:
-                if db and db.db:
+                if self.is_db_connected():
                     user = await db.get_user(user_id)
                     if user:
                         tokens = getattr(user, 'tokens', 0)
@@ -549,7 +607,9 @@ class TelegramReportBot:
         logger.info(f"OWNER_IDS: {config.OWNER_IDS}")
         logger.info(f"SUPER_ADMIN_ID: {config.SUPER_ADMIN_ID}")
         if config.MONGODB_URI:
-            logger.info(f"MONGODB_URI: {config.MONGODB_URI[:30]}...")
+            logger.info(f"MONGODB_URI: {config.MONGODB_URI[:50]}...")
+        else:
+            logger.error("MONGODB_URI is NOT SET!")
         
         # Start healthcheck server in a background thread
         try:
@@ -568,6 +628,15 @@ class TelegramReportBot:
                 if connected:
                     self._db_connected = True
                     logger.info("✅ Database connected successfully!")
+                    
+                    # Test database by listing collections
+                    try:
+                        if self.is_db_connected():
+                            collections = await db.db.list_collection_names()
+                            logger.info(f"✅ Available collections: {collections}")
+                    except Exception as e:
+                        logger.error(f"Database access test failed: {e}")
+                    
                     break
                 else:
                     logger.warning(f"Database connection attempt {attempt + 1} failed")
@@ -581,7 +650,7 @@ class TelegramReportBot:
         if not self._db_connected:
             logger.warning("⚠️ Bot running in limited mode without database")
         
-        logger.info("Bot started successfully!")
+        logger.info("Bot initialization complete")
     
     async def post_shutdown(self, application: Application):
         """Run before bot shutdown"""
@@ -606,6 +675,9 @@ class TelegramReportBot:
         
         # Build application
         self.application = builder.build()
+        
+        # ========== EMERGENCY COMMAND (MUST BE FIRST) ==========
+        self.application.add_handler(CommandHandler("emergency", emergency_test))
         
         # ========== TEST COMMANDS ==========
         self.application.add_handler(CommandHandler("ping", ping_command))
