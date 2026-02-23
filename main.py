@@ -395,6 +395,73 @@ async def handle_bulk_token_input(update: Update, context: ContextTypes.DEFAULT_
     elif context.user_data.get('awaiting_token_input'):
         await update.message.reply_text("Token addition processing coming soon...")
 
+# ========== NEW DEBUG COMMANDS ==========
+async def debug_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug database initialization"""
+    msg = await update.message.reply_text("🔍 Debugging database...")
+    
+    info = []
+    info.append(f"db object exists: {db is not None}")
+    info.append(f"db.client exists: {db.client is not None if db else False}")
+    info.append(f"db.db exists: {db.db is not None if db else False}")
+    
+    if db and hasattr(db, '_connection_attempts'):
+        info.append(f"Connection attempts: {db._connection_attempts}")
+    
+    if config.MONGODB_URI:
+        # Mask the password for display
+        try:
+            masked = config.MONGODB_URI.replace(config.MONGODB_URI.split('@')[0].split(':')[1], '****') if '@' in config.MONGODB_URI and ':' in config.MONGODB_URI.split('@')[0] else config.MONGODB_URI[:30] + "..."
+            info.append(f"MONGODB_URI: {masked}")
+        except:
+            info.append(f"MONGODB_URI: {config.MONGODB_URI[:30]}...")
+    else:
+        info.append("MONGODB_URI: Not set!")
+    
+    await msg.edit_text("\n".join(info))
+
+async def fix_client_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force reinitialize database client"""
+    msg = await update.message.reply_text("🔄 Attempting to force reinitialize database...")
+    
+    try:
+        # Reset the database client
+        global db
+        from database import Database
+        new_db = Database()
+        
+        # Try to connect
+        connected = await new_db.connect()
+        
+        if connected:
+            # Replace the global db instance
+            db = new_db
+            # Update the bot's connection status if possible
+            if hasattr(context, 'bot') and hasattr(context.bot, 'application'):
+                # Try to find the bot instance
+                for handler in context.application.handlers:
+                    if hasattr(handler, 'callback') and hasattr(handler.callback, '__self__'):
+                        bot_instance = handler.callback.__self__
+                        if hasattr(bot_instance, '_db_connected'):
+                            bot_instance._db_connected = True
+                            break
+            
+            await msg.edit_text(
+                "✅ **Database Client Fixed!**\n\n"
+                "Database client has been reinitialized and connected.\n"
+                "Try running /createme or /emfix now.",
+                parse_mode='Markdown'
+            )
+        else:
+            await msg.edit_text(
+                "❌ **Still Cannot Connect**\n\n"
+                "Please check your MongoDB URI and credentials.\n"
+                "Current URI format looks correct but connection failed.",
+                parse_mode='Markdown'
+            )
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)}")
+
 # ========== MAIN BOT CLASS ==========
 class TelegramReportBot:
     def __init__(self):
@@ -885,7 +952,7 @@ class TelegramReportBot:
             logger.error(f"Error in whoami: {e}")
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show help information"""
+        """Show help information - UPDATED with new commands"""
         help_text = (
             "📚 **Bot Commands**\n\n"
             "**User Commands:**\n"
@@ -904,6 +971,8 @@ class TelegramReportBot:
             "/pingdb - Simple database ping test\n"
             "/simpledb - Simple database test (no markdown)\n"
             "/showuri - Show current MongoDB URI\n"
+            "/debugdb - Debug database initialization\n"
+            "/fixclient - Force reinitialize database client\n"
             "/emfix - Emergency fix (adds you with 9999 tokens)\n"
             "/login - Add account\n"
             "/accounts - Manage accounts\n"
@@ -1226,6 +1295,8 @@ class TelegramReportBot:
         self.application.add_handler(CommandHandler("pingdb", self.pingdb_command))
         self.application.add_handler(CommandHandler("simpledb", self.simpledb_command))
         self.application.add_handler(CommandHandler("showuri", self.showuri_command))
+        self.application.add_handler(CommandHandler("debugdb", debug_db_command))
+        self.application.add_handler(CommandHandler("fixclient", fix_client_command))
         self.application.add_handler(CommandHandler("emfix", self.emfix_command))
         self.application.add_handler(CommandHandler("givetokens", self.give_tokens_command))
         self.application.add_handler(CommandHandler("addtokens", self.owner_add_tokens_command))
