@@ -373,6 +373,81 @@ async def testdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
+# ========== NEW DIAGNOSTIC COMMANDS ==========
+async def diagdb_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run comprehensive database diagnostics"""
+    msg = await update.message.reply_text("🔍 Running database diagnostics...")
+    
+    results = await db.diagnose_connection()
+    
+    # Format results
+    formatted = "🔍 **Database Diagnostics**\n\n"
+    for r in results:
+        formatted += f"{r}\n"
+    
+    # Split if too long
+    if len(formatted) > 4000:
+        parts = [formatted[i:i+4000] for i in range(0, len(formatted), 4000)]
+        for part in parts:
+            await update.message.reply_text(part, parse_mode='Markdown')
+    else:
+        await msg.edit_text(formatted, parse_mode='Markdown')
+
+async def pingdb_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple database ping test"""
+    try:
+        if db.client:
+            await db.client.admin.command('ping')
+            await update.message.reply_text("✅ Database ping successful!")
+        else:
+            await update.message.reply_text("❌ Database client is None")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ping failed: {e}")
+
+async def simpledb_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple database test without Markdown"""
+    msg = await update.message.reply_text("Testing database connection...")
+    
+    # Check if db object exists
+    if db is None:
+        await msg.edit_text("❌ Database object is None")
+        return
+    
+    # Check if connected
+    is_connected = self.is_db_connected()
+    await msg.edit_text(f"Database connected: {is_connected}")
+    
+    if is_connected:
+        try:
+            # Try to get user count
+            count = await db.get_user_count()
+            await msg.edit_text(f"✅ Database connected! User count: {count}")
+        except Exception as e:
+            await msg.edit_text(f"❌ Error getting user count: {e}")
+
+async def showuri_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current MongoDB URI (masked)"""
+    if config.MONGODB_URI:
+        # Mask the password
+        uri = config.MONGODB_URI
+        try:
+            # Simple masking
+            parts = uri.split('@')
+            if len(parts) > 1:
+                credentials = parts[0].split('://')[1] if '://' in parts[0] else parts[0]
+                if ':' in credentials:
+                    user, passwd = credentials.split(':', 1)
+                    masked = uri.replace(passwd, '****')
+                    await update.message.reply_text(f"Current MONGODB_URI: {masked}")
+                else:
+                    await update.message.reply_text(f"Current MONGODB_URI: {uri[:50]}...")
+            else:
+                await update.message.reply_text(f"Current MONGODB_URI: {uri[:50]}...")
+        except:
+            await update.message.reply_text(f"Current MONGODB_URI: {uri[:50]}...")
+    else:
+        await update.message.reply_text("MONGODB_URI is not set!")
+
 # ========== TOKEN COMMANDS ==========
 async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Give tokens to a user (owner only)"""
@@ -602,14 +677,15 @@ class TelegramReportBot:
             
             if not connected:
                 await msg.edit_text(
-                    "❌ **Database Connection Failed**\n\n"
+                    "❌ DATABASE CONNECTION FAILED\n\n"
                     "Please check your MONGODB_URI in Railway variables.\n"
-                    f"Current URI: `{config.MONGODB_URI[:50] if config.MONGODB_URI else 'Not set'}...`\n\n"
+                    f"Current URI: {config.MONGODB_URI[:50] if config.MONGODB_URI else 'Not set'}...\n\n"
                     "Make sure it's exactly:\n"
-                    "`mongodb+srv://telegram_bot_user:Adiantum@cluster0.ibwg1jy.mongodb.net/telegram_report_bot?retryWrites=true&w=majority`",
-                    parse_mode='Markdown'
+                    "mongodb+srv://telegram_bot_user:Adiantum@cluster0.ibwg1jy.mongodb.net/telegram_report_bot?retryWrites=true&w=majority"
                 )
                 return
+            
+            await msg.edit_text("✅ Database connected! Creating user...")
             
             # Check if we can access the database
             try:
@@ -618,6 +694,7 @@ class TelegramReportBot:
                 await test_collection.insert_one({"test": "data", "timestamp": datetime.now()})
                 await test_collection.delete_many({})
                 logger.info("✅ Database write test passed")
+                await msg.edit_text("✅ Database write test passed! Adding user...")
             except Exception as e:
                 logger.error(f"Database write test failed: {e}")
                 await msg.edit_text(f"❌ Database connected but write test failed: {e}")
@@ -629,14 +706,16 @@ class TelegramReportBot:
             
             if owner:
                 # Update existing owner
+                old_balance = owner.tokens
                 await db.update_user_tokens(owner_id, 9999)
                 await msg.edit_text(
-                    f"✅ **Owner Updated!**\n\n"
-                    f"User ID: `{owner_id}`\n"
+                    f"✅ OWNER UPDATED!\n\n"
+                    f"User ID: {owner_id}\n"
+                    f"Previous tokens: {old_balance}\n"
                     f"Added 9999 tokens\n"
-                    f"New balance: {owner.tokens + 9999}\n\n"
-                    f"Database is now working!",
-                    parse_mode='Markdown'
+                    f"New balance: {old_balance + 9999}\n\n"
+                    f"Database is now working!\n"
+                    f"Use /balance to check your tokens."
                 )
             else:
                 # Create new owner
@@ -649,11 +728,11 @@ class TelegramReportBot:
                 if new_owner:
                     await db.update_user_tokens(owner_id, 9999)
                     await msg.edit_text(
-                        f"✅ **Owner Created!**\n\n"
-                        f"User ID: `{owner_id}`\n"
+                        f"✅ OWNER CREATED!\n\n"
+                        f"User ID: {owner_id}\n"
                         f"Tokens: 9999\n\n"
-                        f"Database is now working!",
-                        parse_mode='Markdown'
+                        f"Database is now working!\n"
+                        f"Use /balance to check your tokens."
                     )
                 else:
                     await msg.edit_text("❌ Failed to create user")
@@ -669,6 +748,7 @@ class TelegramReportBot:
                     last_name="User"
                 )
                 await db.update_user_tokens(test_id, 100)
+                await msg.edit_text(msg.text + "\n\n✅ Test user created with ID 987654321")
             
         except Exception as e:
             logger.error(f"Emergency fix error: {e}")
@@ -802,6 +882,10 @@ class TelegramReportBot:
             "/createme - Add yourself to database\n"
             "/fixdb - Diagnose database issues\n"
             "/testdb - Test database connection\n"
+            "/diagdb - Comprehensive database diagnostics\n"
+            "/pingdb - Simple database ping test\n"
+            "/simpledb - Simple database test (no markdown)\n"
+            "/showuri - Show current MongoDB URI\n"
             "/emfix - Emergency fix (adds you with 9999 tokens)\n"
             "/login - Add account\n"
             "/accounts - Manage accounts\n"
@@ -1122,6 +1206,10 @@ class TelegramReportBot:
         self.application.add_handler(CommandHandler("createme", create_me_command))
         self.application.add_handler(CommandHandler("fixdb", fixdb_command))
         self.application.add_handler(CommandHandler("testdb", testdb_command))
+        self.application.add_handler(CommandHandler("diagdb", self.diagdb_command))
+        self.application.add_handler(CommandHandler("pingdb", self.pingdb_command))
+        self.application.add_handler(CommandHandler("simpledb", self.simpledb_command))
+        self.application.add_handler(CommandHandler("showuri", self.showuri_command))
         self.application.add_handler(CommandHandler("emfix", self.emfix_command))
         
         # User commands
