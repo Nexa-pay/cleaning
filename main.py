@@ -320,8 +320,6 @@ async def fixdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         connected = await db.connect()
         if connected:
             message += "✅ Connection successful!\n"
-            if hasattr(self, '_db_connected'):
-                self._db_connected = True
         else:
             message += "❌ Connection failed\n"
     except Exception as e:
@@ -374,92 +372,6 @@ async def testdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
-
-# ========== EMERGENCY FIX COMMAND ==========
-async def emfix_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Emergency fix - add owner to database with 9999 tokens"""
-    user_id = update.effective_user.id
-    user = update.effective_user
-    
-    msg = await update.message.reply_text("🔄 Running emergency database fix...")
-    
-    try:
-        # Try to connect manually
-        connected = await db.connect()
-        
-        if not connected:
-            await msg.edit_text(
-                "❌ **Database Connection Failed**\n\n"
-                "Please check your MONGODB_URI in Railway variables.\n"
-                f"Current URI: `{config.MONGODB_URI[:50] if config.MONGODB_URI else 'Not set'}...`\n\n"
-                "Make sure it's exactly:\n"
-                "`mongodb+srv://telegram_bot_user:Adiantum@cluster0.ibwg1jy.mongodb.net/telegram_report_bot?retryWrites=true&w=majority`",
-                parse_mode='Markdown'
-            )
-            return
-        
-        # Check if we can access the database
-        try:
-            # Try to create a test collection
-            test_collection = db.db.test_connection
-            await test_collection.insert_one({"test": "data", "timestamp": datetime.now()})
-            await test_collection.delete_many({})
-            logger.info("✅ Database write test passed")
-        except Exception as e:
-            logger.error(f"Database write test failed: {e}")
-            await msg.edit_text(f"❌ Database connected but write test failed: {e}")
-            return
-        
-        # Create owner user with 9999 tokens
-        owner_id = user_id
-        owner = await db.get_user(owner_id)
-        
-        if owner:
-            # Update existing owner
-            await db.update_user_tokens(owner_id, 9999)
-            await msg.edit_text(
-                f"✅ **Owner Updated!**\n\n"
-                f"User ID: `{owner_id}`\n"
-                f"Added 9999 tokens\n"
-                f"New balance: {owner.tokens + 9999}\n\n"
-                f"Database is now working!",
-                parse_mode='Markdown'
-            )
-        else:
-            # Create new owner
-            new_owner = await db.create_user(
-                user_id=owner_id,
-                username=user.username,
-                first_name=user.first_name,
-                last_name=user.last_name
-            )
-            if new_owner:
-                await db.update_user_tokens(owner_id, 9999)
-                await msg.edit_text(
-                    f"✅ **Owner Created!**\n\n"
-                    f"User ID: `{owner_id}`\n"
-                    f"Tokens: 9999\n\n"
-                    f"Database is now working!",
-                    parse_mode='Markdown'
-                )
-            else:
-                await msg.edit_text("❌ Failed to create user")
-        
-        # Create a test user
-        test_id = 987654321
-        test_user = await db.get_user(test_id)
-        if not test_user:
-            await db.create_user(
-                user_id=test_id,
-                username="test_user",
-                first_name="Test",
-                last_name="User"
-            )
-            await db.update_user_tokens(test_id, 100)
-        
-    except Exception as e:
-        logger.error(f"Emergency fix error: {e}")
-        await msg.edit_text(f"❌ Error: {str(e)}")
 
 # ========== TOKEN COMMANDS ==========
 async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -676,6 +588,91 @@ class TelegramReportBot:
         return (db is not None and 
                 hasattr(db, 'db') and 
                 db.db is not None)
+    
+    async def emfix_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Emergency fix - add owner to database with 9999 tokens"""
+        user_id = update.effective_user.id
+        user = update.effective_user
+        
+        msg = await update.message.reply_text("🔄 Running emergency database fix...")
+        
+        try:
+            # Try to connect manually
+            connected = await db.connect()
+            
+            if not connected:
+                await msg.edit_text(
+                    "❌ **Database Connection Failed**\n\n"
+                    "Please check your MONGODB_URI in Railway variables.\n"
+                    f"Current URI: `{config.MONGODB_URI[:50] if config.MONGODB_URI else 'Not set'}...`\n\n"
+                    "Make sure it's exactly:\n"
+                    "`mongodb+srv://telegram_bot_user:Adiantum@cluster0.ibwg1jy.mongodb.net/telegram_report_bot?retryWrites=true&w=majority`",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Check if we can access the database
+            try:
+                # Try to create a test collection
+                test_collection = db.db.test_connection
+                await test_collection.insert_one({"test": "data", "timestamp": datetime.now()})
+                await test_collection.delete_many({})
+                logger.info("✅ Database write test passed")
+            except Exception as e:
+                logger.error(f"Database write test failed: {e}")
+                await msg.edit_text(f"❌ Database connected but write test failed: {e}")
+                return
+            
+            # Create owner user with 9999 tokens
+            owner_id = user_id
+            owner = await db.get_user(owner_id)
+            
+            if owner:
+                # Update existing owner
+                await db.update_user_tokens(owner_id, 9999)
+                await msg.edit_text(
+                    f"✅ **Owner Updated!**\n\n"
+                    f"User ID: `{owner_id}`\n"
+                    f"Added 9999 tokens\n"
+                    f"New balance: {owner.tokens + 9999}\n\n"
+                    f"Database is now working!",
+                    parse_mode='Markdown'
+                )
+            else:
+                # Create new owner
+                new_owner = await db.create_user(
+                    user_id=owner_id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name
+                )
+                if new_owner:
+                    await db.update_user_tokens(owner_id, 9999)
+                    await msg.edit_text(
+                        f"✅ **Owner Created!**\n\n"
+                        f"User ID: `{owner_id}`\n"
+                        f"Tokens: 9999\n\n"
+                        f"Database is now working!",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await msg.edit_text("❌ Failed to create user")
+            
+            # Create a test user
+            test_id = 987654321
+            test_user = await db.get_user(test_id)
+            if not test_user:
+                await db.create_user(
+                    user_id=test_id,
+                    username="test_user",
+                    first_name="Test",
+                    last_name="User"
+                )
+                await db.update_user_tokens(test_id, 100)
+            
+        except Exception as e:
+            logger.error(f"Emergency fix error: {e}")
+            await msg.edit_text(f"❌ Error: {str(e)}")
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message with inline buttons"""
