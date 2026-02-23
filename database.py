@@ -4,6 +4,8 @@ from typing import Optional, List, Dict, Any
 import logging
 import uuid
 import asyncio
+import socket
+import dns.resolver
 
 from models import *
 import config
@@ -18,22 +20,53 @@ class Database:
         self._connection_attempts = 0
         
     async def connect(self):
-        """Connect to MongoDB with retry logic"""
+        """Connect to MongoDB with improved error handling and diagnostics"""
         try:
             if not config.MONGODB_URI:
                 logger.error("❌ MONGODB_URI not set in environment variables!")
                 return False
-                
-            logger.info(f"🔄 Attempting to connect to MongoDB...")
             
-            # Connect with timeout
+            # Log URI safely (hide password)
+            safe_uri = self._mask_uri(config.MONGODB_URI)
+            logger.info(f"🔄 Attempting to connect to MongoDB...")
+            logger.info(f"🔗 URI (masked): {safe_uri}")
+            
+            # Check if URI has the correct format
+            if 'mongodb+srv://' not in config.MONGODB_URI:
+                logger.error("❌ URI should start with mongodb+srv://")
+                return False
+            
+            if '<password>' in config.MONGODB_URI:
+                logger.error("❌ You forgot to replace <password> with your actual password!")
+                return False
+            
+            # Test DNS resolution first
+            logger.info("🔍 Testing DNS resolution...")
+            try:
+                # Extract hostname from URI
+                hostname = config.MONGODB_URI.split('@')[1].split('/')[0]
+                logger.info(f"   Hostname: {hostname}")
+                
+                # Try to resolve
+                answers = dns.resolver.resolve(hostname, 'A')
+                logger.info(f"✅ DNS resolution successful: {answers[0].address}")
+            except Exception as dns_error:
+                logger.error(f"❌ DNS resolution failed: {dns_error}")
+                logger.error("   This usually means the cluster name is wrong or network is blocked")
+            
+            # Connect with increased timeouts
+            logger.info("🔄 Creating MongoDB client...")
             self.client = motor.motor_asyncio.AsyncIOMotorClient(
                 config.MONGODB_URI,
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=5000
+                serverSelectionTimeoutMS=15000,  # Increased timeout
+                connectTimeoutMS=15000,
+                socketTimeoutMS=15000,
+                retryWrites=True,
+                retryReads=True
             )
             
-            # Test connection
+            # Test connection with ping
+            logger.info("🔄 Pinging MongoDB...")
             await self.client.admin.command('ping')
             logger.info("✅ MongoDB ping successful!")
             
@@ -41,24 +74,70 @@ class Database:
             self.db = self.client[config.DATABASE_NAME]
             logger.info(f"✅ Using database: {config.DATABASE_NAME}")
             
+            # List collections to verify access
+            try:
+                collections = await self.db.list_collection_names()
+                logger.info(f"✅ Available collections: {collections}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not list collections: {e}")
+            
             # Initialize default data
             await self._init_default_data()
             
-            # Create indexes (with error handling)
+            # Create indexes
             try:
                 await self._create_indexes()
                 logger.info("✅ Database indexes created successfully!")
             except Exception as e:
-                logger.error(f"⚠️ Index creation warning: {e}")
+                logger.warning(f"⚠️ Index creation warning: {e}")
             
             logger.info("✅ Database connected successfully")
             return True
             
-        except Exception as e:
-            logger.error(f"❌ Database connection failed: {e}")
+        except motor.motor_asyncio.AsyncIOMotorClientError as e:
+            logger.error(f"❌ Motor client error: {e}")
+            self._log_connection_help(e)
             self.client = None
             self.db = None
             return False
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {e}")
+            logger.error(f"Error type: {type(e).__name__}")
+            self._log_connection_help(e)
+            self.client = None
+            self.db = None
+            return False
+    
+    def _mask_uri(self, uri: str) -> str:
+        """Mask password in URI for logging"""
+        try:
+            # Find password part between : and @
+            start = uri.find('://') + 3
+            at_pos = uri.find('@')
+            if start > 0 and at_pos > start:
+                user_pass = uri[start:at_pos]
+                if ':' in user_pass:
+                    user, password = user_pass.split(':', 1)
+                    return uri[:start] + f"{user}:****" + uri[at_pos:]
+            return uri[:30] + "..."  # Fallback truncation
+        except:
+            return uri[:30] + "..."
+    
+    def _log_connection_help(self, error: Exception):
+        """Log helpful suggestions based on error"""
+        error_str = str(error).lower()
+        
+        if 'authentication failed' in error_str or 'auth failed' in error_str:
+            logger.error("💡 Suggestion: Check your username and password in MONGODB_URI")
+            logger.error("   Make sure password doesn't contain special characters that need encoding")
+        elif 'getaddrinfo' in error_str or 'dns' in error_str:
+            logger.error("💡 Suggestion: Check your cluster name in MONGODB_URI")
+            logger.error("   It should look like: cluster0.abc12.mongodb.net")
+        elif 'timed out' in error_str or 'timeout' in error_str:
+            logger.error("💡 Suggestion: Check network access in MongoDB Atlas")
+            logger.error("   Add IP 0.0.0.0/0 to allow access from anywhere")
+        elif 'ssl' in error_str:
+            logger.error("💡 Suggestion: Make sure you're using mongodb+srv:// not mongodb://")
     
     async def _create_indexes(self):
         """Create database indexes"""
@@ -92,7 +171,7 @@ class Database:
         await self.db.report_templates.create_index("template_id", unique=True)
     
     async def _init_default_data(self):
-        """Initialize default data in database"""
+        """Initialize default data in database with expanded templates"""
         if not self.db:
             return
             
@@ -103,29 +182,101 @@ class Database:
             if not existing:
                 await self.db.token_packages.insert_one(package.__dict__)
         
-        # Initialize report templates if not exist
+        # Initialize expanded report templates with all categories
         templates = [
             {
+                "template_id": "abuse",
+                "name": "🚫 Abuse/Harassment",
+                "category": "abuse",
+                "content": "This user is engaging in harassment, bullying, or abusive behavior.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "pron",
+                "name": "🔞 Adult Content/Pron",
+                "category": "pron",
+                "content": "This account is sharing adult content or pornography.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "information",
+                "name": "📋 Personal Information Leak",
+                "category": "information",
+                "content": "This user is sharing personal information without consent.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "data_leak",
+                "name": "💾 Data Leak/Private Info",
+                "category": "data_leak",
+                "content": "This account is leaking private data or confidential information.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "sticker_pron",
+                "name": "🎭 Sticker - Adult Content",
+                "category": "sticker_pron",
+                "content": "This sticker contains adult or explicit content.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "harassing",
+                "name": "⚠️ Harassing Behavior",
+                "category": "harassing",
+                "content": "This user is engaging in targeted harassment.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "personal_data",
+                "name": "🔐 Personal Data Exposure",
+                "category": "personal_data",
+                "content": "This account is exposing personal data without permission.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
                 "template_id": "spam",
-                "name": "Spam Report",
+                "name": "📧 Spam",
                 "category": "spam",
-                "content": "This account is sending spam messages including promotional content and unwanted advertisements.",
+                "content": "This account is sending spam messages.",
                 "created_by": 0,
                 "is_public": True
             },
             {
                 "template_id": "scam",
-                "name": "Scam Report",
+                "name": "💰 Scam/Fraud",
                 "category": "scam",
-                "content": "This account is attempting to scam users by promising fake rewards and requesting personal information.",
+                "content": "This account is attempting to scam users.",
                 "created_by": 0,
                 "is_public": True
             },
             {
-                "template_id": "harassment",
-                "name": "Harassment Report",
-                "category": "harassment",
-                "content": "This user is engaging in harassment, bullying, and making threats against others.",
+                "template_id": "impersonation",
+                "name": "👤 Impersonation",
+                "category": "impersonation",
+                "content": "This account is impersonating someone else.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "illegal",
+                "name": "⚖️ Illegal Content",
+                "category": "illegal",
+                "content": "This account is sharing illegal content.",
+                "created_by": 0,
+                "is_public": True
+            },
+            {
+                "template_id": "other",
+                "name": "📌 Other",
+                "category": "other",
+                "content": "Other violation not listed above.",
                 "created_by": 0,
                 "is_public": True
             }
@@ -135,13 +286,21 @@ class Database:
             existing = await self.db.report_templates.find_one({"template_id": template["template_id"]})
             if not existing:
                 await self.db.report_templates.insert_one(template)
+                logger.info(f"✅ Created template: {template['name']}")
     
     async def ensure_connection(self):
         """Ensure database is connected, attempt reconnection if needed"""
         if not self.db or not self.client:
             logger.warning("⚠️ Database not connected, attempting reconnection...")
             return await self.connect()
-        return True
+        
+        # Test if connection is still alive
+        try:
+            await self.client.admin.command('ping')
+            return True
+        except:
+            logger.warning("⚠️ Connection lost, reconnecting...")
+            return await self.connect()
     
     # ========== User Methods ==========
     
@@ -657,7 +816,7 @@ class Database:
             logger.error(f"Error getting transactions for {user_id}: {e}")
             return []
     
-    # ========== NEW: Recent Transactions Method ==========
+    # ========== Recent Transactions Method ==========
     async def get_recent_transactions(self, limit: int = 20) -> List[Transaction]:
         """Get recent transactions across all users"""
         if not await self.ensure_connection():
