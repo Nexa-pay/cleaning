@@ -77,7 +77,9 @@ def start_healthcheck_server():
     finally:
         loop.close()
 
-# ========== EMERGENCY TEST COMMAND ==========
+# ========== STANDALONE COMMAND FUNCTIONS ==========
+# These functions are defined outside the class
+
 async def emergency_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Emergency test command that works without database"""
     try:
@@ -125,7 +127,6 @@ async def emergency_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Emergency test error: {str(e)}")
 
-# ========== TEST COMMANDS ==========
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Simple ping command"""
     try:
@@ -196,7 +197,6 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Debug command error: {e}")
 
-# ========== DATABASE DEBUG COMMANDS ==========
 async def checkdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check database status"""
     try:
@@ -373,180 +373,26 @@ async def testdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
-# ========== TOKEN COMMANDS ==========
 async def give_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Give tokens to a user (owner only)"""
-    user_id = update.effective_user.id
-    
-    # Check if owner
-    if user_id not in config.OWNER_IDS and user_id != config.SUPER_ADMIN_ID:
-        await update.message.reply_text("❌ Owner only command.")
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: `/givetokens <user_id> <amount>`\n"
-            "Example: `/givetokens 8289517006 100`\n\n"
-            "**Owner Commands:**\n"
-            "• `/addtokens @username 100` - Add tokens by username\n"
-            "• `/tokenstats` - View token statistics",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        target_id = int(context.args[0])
-        amount = int(context.args[1])
-        
-        if amount <= 0:
-            await update.message.reply_text("❌ Amount must be positive.")
-            return
-        
-        if not self.is_db_connected():
-            await update.message.reply_text("❌ Database not connected.")
-            return
-        
-        success = await db.update_user_tokens(target_id, amount)
-        
-        if success:
-            await update.message.reply_text(
-                f"✅ Added **{amount}** tokens to user `{target_id}`",
-                parse_mode='Markdown'
-            )
-            try:
-                await context.bot.send_message(
-                    chat_id=target_id,
-                    text=f"💰 You received **{amount}** tokens from owner!",
-                    parse_mode='Markdown'
-                )
-            except:
-                pass
-        else:
-            await update.message.reply_text(
-                f"❌ Failed to add tokens. User `{target_id}` may not exist.",
-                parse_mode='Markdown'
-            )
-            
-    except ValueError:
-        await update.message.reply_text("❌ Invalid user ID or amount.")
-    except Exception as e:
-        logger.error(f"Error: {e}")
+    """Give tokens to a user (owner only) - This will be called with self parameter"""
+    # This is a placeholder - the actual implementation is in the class
+    pass
 
-# ========== OWNER TOKEN MANAGEMENT COMMANDS ==========
 async def owner_add_tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner command to add tokens (usage: /addtokens @username 100)"""
-    user_id = update.effective_user.id
-    
-    # Check if owner
-    if user_id not in config.OWNER_IDS and user_id != config.SUPER_ADMIN_ID:
-        await update.message.reply_text("❌ Owner only command.")
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: `/addtokens <username or user_id> <amount>`\n"
-            "Examples:\n"
-            "• `/addtokens @username 100`\n"
-            "• `/addtokens 123456789 100`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        target = context.args[0]
-        amount = int(context.args[1])
-        
-        if amount <= 0:
-            await update.message.reply_text("❌ Amount must be positive.")
-            return
-        
-        # Find user
-        target_id = None
-        if target.startswith('@'):
-            # Find by username
-            user = await db.get_user_by_username(target[1:])
-            if user:
-                target_id = user.user_id
-        else:
-            # Find by user ID
-            try:
-                target_id = int(target)
-            except ValueError:
-                await update.message.reply_text("❌ Invalid user ID or username.")
-                return
-        
-        if not target_id:
-            await update.message.reply_text(f"❌ User {target} not found.")
-            return
-        
-        # Add tokens
-        success = await db.update_user_tokens(target_id, amount)
-        
-        if success:
-            await update.message.reply_text(
-                f"✅ Added **{amount}** tokens to {target}\n"
-                f"User ID: `{target_id}`",
-                parse_mode='Markdown'
-            )
-            
-            # Notify user
-            try:
-                await context.bot.send_message(
-                    chat_id=target_id,
-                    text=f"💰 **You received {amount} tokens from owner!**",
-                    parse_mode='Markdown'
-                )
-            except:
-                pass
-        else:
-            await update.message.reply_text("❌ Failed to add tokens.")
-            
-    except ValueError:
-        await update.message.reply_text("❌ Invalid amount. Use numbers only.")
-    except Exception as e:
-        logger.error(f"Error in addtokens: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+    """Owner command to add tokens - This will be called with self parameter"""
+    # This is a placeholder - the actual implementation is in the class
+    pass
 
 async def owner_token_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show token statistics"""
-    user_id = update.effective_user.id
-    
-    if user_id not in config.OWNER_IDS and user_id != config.SUPER_ADMIN_ID:
-        await update.message.reply_text("❌ Owner only command.")
-        return
-    
-    try:
-        total_users = await db.get_user_count()
-        total_tokens = 0
-        
-        if db and db.db:
-            pipeline = [
-                {"$match": {"status": "completed"}},
-                {"$group": {"_id": None, "total": {"$sum": "$tokens_purchased"}}}
-            ]
-            result = await db.db.transactions.aggregate(pipeline).to_list(1)
-            total_tokens = result[0]['total'] if result else 0
-        
-        await update.message.reply_text(
-            f"📊 **Token Statistics**\n\n"
-            f"**Total Users:** {total_users}\n"
-            f"**Total Tokens Issued:** {total_tokens}\n\n"
-            f"Use `/addtokens` to add tokens to users.",
-            parse_mode='Markdown'
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in token stats: {e}")
-        await update.message.reply_text("❌ Error fetching statistics.")
+    """Show token statistics - This will be called with self parameter"""
+    # This is a placeholder - the actual implementation is in the class
+    pass
 
-# ========== BULK TOKEN INPUT HANDLER ==========
 async def handle_bulk_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle bulk token input"""
     if context.user_data.get('awaiting_bulk_tokens'):
-        # This would need to be implemented in admin_handler
         await update.message.reply_text("Bulk token processing coming soon...")
     elif context.user_data.get('awaiting_token_input'):
-        # This would need to be implemented in admin_handler
         await update.message.reply_text("Token addition processing coming soon...")
 
 # ========== MAIN BOT CLASS ==========
@@ -589,30 +435,38 @@ class TelegramReportBot:
                 hasattr(db, 'db') and 
                 db.db is not None)
     
-    # ========== NEW DIAGNOSTIC COMMANDS ==========
+    # ========== CLASS METHODS THAT NEED 'self' ==========
+    
     async def diagdb_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Run comprehensive database diagnostics"""
         msg = await update.message.reply_text("🔍 Running database diagnostics...")
         
-        results = await db.diagnose_connection()
-        
-        # Format results
-        formatted = "🔍 **Database Diagnostics**\n\n"
-        for r in results:
-            formatted += f"{r}\n"
-        
-        # Split if too long
-        if len(formatted) > 4000:
-            parts = [formatted[i:i+4000] for i in range(0, len(formatted), 4000)]
-            for part in parts:
-                await update.message.reply_text(part, parse_mode='Markdown')
-        else:
-            await msg.edit_text(formatted, parse_mode='Markdown')
+        try:
+            # Check if db has diagnose_connection method
+            if hasattr(db, 'diagnose_connection'):
+                results = await db.diagnose_connection()
+                
+                # Format results
+                formatted = "🔍 **Database Diagnostics**\n\n"
+                for r in results:
+                    formatted += f"{r}\n"
+                
+                # Split if too long
+                if len(formatted) > 4000:
+                    parts = [formatted[i:i+4000] for i in range(0, len(formatted), 4000)]
+                    for part in parts:
+                        await update.message.reply_text(part, parse_mode='Markdown')
+                else:
+                    await msg.edit_text(formatted, parse_mode='Markdown')
+            else:
+                await msg.edit_text("❌ Database diagnostic method not available")
+        except Exception as e:
+            await msg.edit_text(f"❌ Error running diagnostics: {str(e)}")
 
     async def pingdb_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Simple database ping test"""
         try:
-            if db.client:
+            if db and db.client:
                 await db.client.admin.command('ping')
                 await update.message.reply_text("✅ Database ping successful!")
             else:
@@ -753,6 +607,170 @@ class TelegramReportBot:
         except Exception as e:
             logger.error(f"Emergency fix error: {e}")
             await msg.edit_text(f"❌ Error: {str(e)}")
+    
+    async def give_tokens_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Give tokens to a user (owner only)"""
+        user_id = update.effective_user.id
+        
+        # Check if owner
+        if user_id not in config.OWNER_IDS and user_id != config.SUPER_ADMIN_ID:
+            await update.message.reply_text("❌ Owner only command.")
+            return
+        
+        if not context.args or len(context.args) < 2:
+            await update.message.reply_text(
+                "Usage: `/givetokens <user_id> <amount>`\n"
+                "Example: `/givetokens 8289517006 100`\n\n"
+                "**Owner Commands:**\n"
+                "• `/addtokens @username 100` - Add tokens by username\n"
+                "• `/tokenstats` - View token statistics",
+                parse_mode='Markdown'
+            )
+            return
+        
+        try:
+            target_id = int(context.args[0])
+            amount = int(context.args[1])
+            
+            if amount <= 0:
+                await update.message.reply_text("❌ Amount must be positive.")
+                return
+            
+            if not self.is_db_connected():
+                await update.message.reply_text("❌ Database not connected.")
+                return
+            
+            success = await db.update_user_tokens(target_id, amount)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ Added **{amount}** tokens to user `{target_id}`",
+                    parse_mode='Markdown'
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_id,
+                        text=f"💰 You received **{amount}** tokens from owner!",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+            else:
+                await update.message.reply_text(
+                    f"❌ Failed to add tokens. User `{target_id}` may not exist.",
+                    parse_mode='Markdown'
+                )
+                
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID or amount.")
+        except Exception as e:
+            logger.error(f"Error: {e}")
+
+    async def owner_add_tokens_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Owner command to add tokens (usage: /addtokens @username 100)"""
+        user_id = update.effective_user.id
+        
+        # Check if owner
+        if user_id not in config.OWNER_IDS and user_id != config.SUPER_ADMIN_ID:
+            await update.message.reply_text("❌ Owner only command.")
+            return
+        
+        if not context.args or len(context.args) < 2:
+            await update.message.reply_text(
+                "Usage: `/addtokens <username or user_id> <amount>`\n"
+                "Examples:\n"
+                "• `/addtokens @username 100`\n"
+                "• `/addtokens 123456789 100`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        try:
+            target = context.args[0]
+            amount = int(context.args[1])
+            
+            if amount <= 0:
+                await update.message.reply_text("❌ Amount must be positive.")
+                return
+            
+            # Find user
+            target_id = None
+            if target.startswith('@'):
+                # Find by username
+                user = await db.get_user_by_username(target[1:])
+                if user:
+                    target_id = user.user_id
+            else:
+                # Find by user ID
+                try:
+                    target_id = int(target)
+                except ValueError:
+                    await update.message.reply_text("❌ Invalid user ID or username.")
+                    return
+            
+            if not target_id:
+                await update.message.reply_text(f"❌ User {target} not found.")
+                return
+            
+            # Add tokens
+            success = await db.update_user_tokens(target_id, amount)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ Added **{amount}** tokens to {target}\n"
+                    f"User ID: `{target_id}`",
+                    parse_mode='Markdown'
+                )
+                
+                # Notify user
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_id,
+                        text=f"💰 **You received {amount} tokens from owner!**",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+            else:
+                await update.message.reply_text("❌ Failed to add tokens.")
+                
+        except ValueError:
+            await update.message.reply_text("❌ Invalid amount. Use numbers only.")
+        except Exception as e:
+            logger.error(f"Error in addtokens: {e}")
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+    async def owner_token_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show token statistics"""
+        user_id = update.effective_user.id
+        
+        if user_id not in config.OWNER_IDS and user_id != config.SUPER_ADMIN_ID:
+            await update.message.reply_text("❌ Owner only command.")
+            return
+        
+        try:
+            total_users = await db.get_user_count()
+            total_tokens = 0
+            
+            if db and db.db:
+                pipeline = [
+                    {"$match": {"status": "completed"}},
+                    {"$group": {"_id": None, "total": {"$sum": "$tokens_purchased"}}}
+                ]
+                result = await db.db.transactions.aggregate(pipeline).to_list(1)
+                total_tokens = result[0]['total'] if result else 0
+            
+            await update.message.reply_text(
+                f"📊 **Token Statistics**\n\n"
+                f"**Total Users:** {total_users}\n"
+                f"**Total Tokens Issued:** {total_tokens}\n\n"
+                f"Use `/addtokens` to add tokens to users.",
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in token stats: {e}")
+            await update.message.reply_text("❌ Error fetching statistics.")
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message with inline buttons"""
@@ -1193,24 +1211,25 @@ class TelegramReportBot:
         
         self.application = builder.build()
         
-        # Emergency command
+        # Standalone commands (no self needed)
         self.application.add_handler(CommandHandler("emergency", emergency_test))
-        
-        # Test commands
         self.application.add_handler(CommandHandler("ping", ping_command))
         self.application.add_handler(CommandHandler("test", test_command))
         self.application.add_handler(CommandHandler("debug", debug_command))
-        
-        # Database debug commands
         self.application.add_handler(CommandHandler("checkdb", checkdb_command))
         self.application.add_handler(CommandHandler("createme", create_me_command))
         self.application.add_handler(CommandHandler("fixdb", fixdb_command))
         self.application.add_handler(CommandHandler("testdb", testdb_command))
+        
+        # Class methods (need self)
         self.application.add_handler(CommandHandler("diagdb", self.diagdb_command))
         self.application.add_handler(CommandHandler("pingdb", self.pingdb_command))
         self.application.add_handler(CommandHandler("simpledb", self.simpledb_command))
         self.application.add_handler(CommandHandler("showuri", self.showuri_command))
         self.application.add_handler(CommandHandler("emfix", self.emfix_command))
+        self.application.add_handler(CommandHandler("givetokens", self.give_tokens_command))
+        self.application.add_handler(CommandHandler("addtokens", self.owner_add_tokens_command))
+        self.application.add_handler(CommandHandler("tokenstats", self.owner_token_stats_command))
         
         # User commands
         self.application.add_handler(CommandHandler("start", self.start))
@@ -1221,12 +1240,7 @@ class TelegramReportBot:
         self.application.add_handler(CommandHandler("buy", self.payment_handler.show_token_packages))
         self.application.add_handler(CommandHandler("accounts", account_manager.show_accounts))
         self.application.add_handler(CommandHandler("myreports", self.report_handler.my_reports))
-        self.application.add_handler(CommandHandler("givetokens", give_tokens_command))
         self.application.add_handler(CommandHandler("freetokens", self.freetokens_command))
-        
-        # Owner token management commands
-        self.application.add_handler(CommandHandler("addtokens", owner_add_tokens_command))
-        self.application.add_handler(CommandHandler("tokenstats", owner_token_stats_command))
         
         # Admin commands
         self.application.add_handler(CommandHandler("admin", self.admin_handler.admin_panel))
@@ -1284,7 +1298,7 @@ class TelegramReportBot:
             handle_bulk_token_input
         ))
         
-        # Callback query handlers - ORDER MATTERS!
+        # Callback query handlers
         self.application.add_handler(CallbackQueryHandler(account_manager.handle_account_callback, pattern='^(add_account|refresh_accounts|manage_acc_|activate_acc_|deactivate_acc_|set_primary_|rename_acc_|delete_acc_|acc_reports_|confirm_delete_|back_accounts)$'))
         self.application.add_handler(CallbackQueryHandler(self.payment_handler.handle_package_selection, pattern='^(buy_stars_|buy_upi_|check_balance)$'))
         self.application.add_handler(CallbackQueryHandler(self.payment_handler.confirm_payment, pattern='^(confirm_stars_|confirm_upi_|cancel_payment)$'))
