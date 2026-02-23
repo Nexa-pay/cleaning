@@ -53,6 +53,7 @@ class Database:
             except Exception as dns_error:
                 logger.error(f"❌ DNS resolution failed: {dns_error}")
                 logger.error("   This usually means the cluster name is wrong or network is blocked")
+                # Continue anyway, might still work
             
             # Connect with increased timeouts
             logger.info("🔄 Creating MongoDB client...")
@@ -94,13 +95,8 @@ class Database:
             logger.info("✅ Database connected successfully")
             return True
             
-        except motor.motor_asyncio.AsyncIOMotorClientError as e:
-            logger.error(f"❌ Motor client error: {e}")
-            self._log_connection_help(e)
-            self.client = None
-            self.db = None
-            return False
         except Exception as e:
+            # Catch all exceptions - don't use specific Motor exception
             logger.error(f"❌ Database connection failed: {e}")
             logger.error(f"Error type: {type(e).__name__}")
             self._log_connection_help(e)
@@ -138,6 +134,8 @@ class Database:
             logger.error("   Add IP 0.0.0.0/0 to allow access from anywhere")
         elif 'ssl' in error_str:
             logger.error("💡 Suggestion: Make sure you're using mongodb+srv:// not mongodb://")
+        elif 'serverselectiontimeout' in error_str:
+            logger.error("💡 Suggestion: Cannot reach MongoDB server. Check if cluster is running.")
     
     async def _create_indexes(self):
         """Create database indexes"""
@@ -290,7 +288,7 @@ class Database:
     
     async def ensure_connection(self):
         """Ensure database is connected, attempt reconnection if needed"""
-        if not self.db or not self.client:
+        if self.db is None or self.client is None:
             logger.warning("⚠️ Database not connected, attempting reconnection...")
             return await self.connect()
         
@@ -298,8 +296,8 @@ class Database:
         try:
             await self.client.admin.command('ping')
             return True
-        except:
-            logger.warning("⚠️ Connection lost, reconnecting...")
+        except Exception as e:
+            logger.warning(f"⚠️ Connection lost ({e}), reconnecting...")
             return await self.connect()
     
     # ========== User Methods ==========
