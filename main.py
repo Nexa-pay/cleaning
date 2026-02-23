@@ -1383,19 +1383,37 @@ class TelegramReportBot:
         logger.info("✅ Bot handlers setup complete")
     
     async def run(self):
-        """Run the bot using run_polling()"""
+        """Run the bot - FIXED VERSION"""
         try:
-            logger.info("🚀 Starting bot polling...")
-            await self.application.run_polling(
+            logger.info("🚀 Starting bot...")
+            
+            # Initialize and start
+            await self.application.initialize()
+            await self.application.start()
+            
+            # Start polling (this is not awaitable)
+            await self.application.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES
             )
+            
+            logger.info(f"✅ Bot is running. Press Ctrl+C to stop.")
+            
+            # Keep running
+            while True:
+                await asyncio.sleep(1)
+                
+        except KeyboardInterrupt:
+            logger.info("Stopping bot...")
         except Exception as e:
             logger.error(f"Fatal error: {e}")
+        finally:
+            await self.stop()
     
     async def stop(self):
         """Stop the bot gracefully"""
         try:
+            await self.application.updater.stop()
             await self.application.stop()
             await self.application.shutdown()
             logger.info("Bot stopped successfully")
